@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thyra-memory"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=3.2",
+    "mcp>=1.27",
+    "cryptography>=46",
+    "sentence-transformers>=5",
+    "scikit-learn>=1.6",
+    "scipy>=1.13",
+    "nltk>=3.9",
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+    "pystray>=0.19",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["thyra*"]
+
+[project.scripts]
+thyra = "thyra.cli.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Tools/caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.serena/
+.claude/
+
+# Runtime data
+data/thyra.db
+data/thyra.db-shm
+data/thyra.db-wal
+data/turn_state_*.json
+
+# Env
+.env
+*.env

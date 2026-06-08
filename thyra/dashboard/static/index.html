@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Thyra Memory Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+</head>
+<body x-data="dashboard()" x-init="init()">
+
+<!-- ── Header ──────────────────────────────────────────────────────────────── -->
+<header>
+  <div class="brand">Thyra Memory <span>dashboard</span></div>
+
+  <div class="ns-wrap">
+    <label>namespace</label>
+    <select class="ns-select" :value="nsIndex()" @change="onNsChange($event)">
+      <template x-for="(ns, i) in namespaces" :key="i">
+        <option :value="i" x-text="nsLabel(ns)"></option>
+      </template>
+      <option x-show="!namespaces.length" value="">— no data —</option>
+    </select>
+  </div>
+
+  <div class="status-row">
+    <button class="pill" :class="status.system_enabled ? 'on' : 'off'"
+            @click="toggleSystem()" :title="'Click to toggle system ' + (status.system_enabled ? 'off' : 'on')">
+      System <strong x-text="status.system_enabled ? 'ON' : 'OFF'"></strong>
+    </button>
+    <button class="pill" :class="status.formation_enabled ? 'on' : 'off'"
+            @click="toggleFormation()" :title="'Click to toggle formation ' + (status.formation_enabled ? 'off' : 'on')">
+      Formation <strong x-text="status.formation_enabled ? 'ON' : 'OFF'"></strong>
+    </button>
+    <span class="pill info">
+      Memories: <strong x-text="status.active_memories"></strong>
+    </span>
+    <div class="max-wrap">
+      <span>max/turn:</span>
+      <input type="number" min="0" x-model.number="maxInput">
+      <button @click="applyMaxMemories()" title="Apply max memories per turn">Set</button>
+    </div>
+  </div>
+</header>
+
+<!-- ── Tabs ────────────────────────────────────────────────────────────────── -->
+<nav class="tabs">
+  <button :class="tab === 'memories' && 'active'" @click="switchTab('memories')">Memories</button>
+  <button :class="tab === 'stats' && 'active'" @click="switchTab('stats')">Stats</button>
+  <button :class="tab === 'activity' && 'active'" @click="switchTab('activity')">Activity</button>
+  <button :class="tab === 'logs' && 'active'" @click="switchTab('logs')">Logs</button>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     MEMORIES TAB
+════════════════════════════════════════════════════════════════════════════ -->
+<div x-show="tab === 'memories'" class="panel">
+
+  <!-- toolbar -->
+  <div class="toolbar">
+    <input type="text" placeholder="Search memories…" x-model="memSearch"
+           @input="onSearchInput()">
+
+    <select x-model="memCat" @change="loadMemories()">
+      <option value="">All categories</option>
+      <template x-for="c in categories" :key="c">
+        <option :value="c" x-text="c"></option>
+      </template>
+    </select>
+
+    <select x-model="memType" @change="loadMemories()">
+      <option value="">All types</option>
+      <option value="explicit">explicit</option>
+      <option value="semantic">semantic</option>
+      <option value="episodic">episodic</option>
+    </select>
+
+    <span class="sort-label">Sort:</span>
+    <select x-model="memSortBy" @change="loadMemories()">
+      <option value="strength">Strength</option>
+      <option value="created">Created</option>
+      <option value="last_access">Last access</option>
+      <option value="use_count">Use count</option>
+    </select>
+
+    <label><input type="checkbox" x-model="memArchived" @change="loadMemories()"> Archived</label>
+    <label><input type="checkbox" x-model="memProb" @change="loadMemories()"> Probationary only</label>
+  </div>
+
+  <!-- count line -->
+  <div style="font-size:.8rem;color:var(--dim);margin-bottom:.5rem">
+    <span x-text="memTotal"></span> memories
+    <template x-if="memIsGlobal">
+      · <span style="color:var(--accent);font-weight:600">global</span>
+    </template>
+    <template x-if="!memIsGlobal && (memSearch || memCat || memType || memProb)"> · filtered</template>
+  </div>
+
+  <!-- loading -->
+  <div class="loading" x-show="memLoading">Loading…</div>
+
+  <!-- list -->
+  <div class="mem-list" x-show="!memLoading">
+    <template x-if="memories.length === 0">
+      <div class="empty">No memories found.</div>
+    </template>
+    <template x-for="m in memories" :key="m.id">
+      <div class="mem-card"
+           :class="{ probationary: m.probationary, archived: m.archived }"
+           @click="openDetail(m)">
+        <div class="mem-head">
+          <span class="cat-badge" :class="'cat-' + m.category" x-text="m.category"></span>
+          <span class="mem-type" x-text="m.memory_type"></span>
+          <template x-if="memIsGlobal && m.agent_id !== activeNs.agent_id">
+            <span class="tag-ns" x-text="m.agent_id"></span>
+          </template>
+          <template x-if="m.probationary"><span class="tag-p">probationary</span></template>
+          <template x-if="m.archived"><span class="tag-a">archived</span></template>
+          <template x-if="m.locked"><span class="tag-l">🔒</span></template>
+          <div class="str-bar" style="margin-left:auto">
+            <div class="str-fill" :style="'width:' + strPct(m) + '%'"></div>
+          </div>
+          <span class="str-val" x-text="m.current_level.toFixed(3)"></span>
+        </div>
+        <div class="mem-snippet" x-text="m.snippet"></div>
+        <div class="mem-meta">
+          <span x-text="'age: ' + m.age_days + 'd'"></span>
+          <span x-text="'uses: ' + m.use_count"></span>
+          <span x-text="'base: ' + m.base_strength"></span>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- pagination -->
+  <div class="pagination" x-show="memPages > 1">
+    <button @click="prevPage()" :disabled="memPage <= 1">← Prev</button>
+    <span x-text="'Page ' + memPage + ' / ' + memPages"></span>
+    <button @click="nextPage()" :disabled="memPage >= memPages">Next →</button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     STATS TAB
+════════════════════════════════════════════════════════════════════════════ -->
+<div x-show="tab === 'stats'" class="panel">
+
+  <!-- top cards -->
+  <div class="stat-cards">
+    <div class="stat-card">
+      <div class="val" x-text="status.active_memories"></div>
+      <div class="lbl">Active memories</div>
+    </div>
+    <div class="stat-card">
+      <div class="val" x-text="status.archived_memories"></div>
+      <div class="lbl">Archived</div>
+    </div>
+    <div class="stat-card">
+      <div class="val" x-text="stats.by_category ? (stats.by_category.reduce((s,c)=>s+c.avg_strength*c.count,0)/Math.max(1,status.active_memories)).toFixed(2) : '…'"></div>
+      <div class="lbl">Avg strength</div>
+    </div>
+    <div class="stat-card">
+      <div class="val" x-text="maxMemLabel()"></div>
+      <div class="lbl">Max / turn</div>
+    </div>
+    <div class="stat-card">
+      <div class="val" style="font-size:0.9rem" x-text="lastNightlyLabel()"></div>
+      <div class="lbl">Last nightly sweep</div>
+    </div>
+  </div>
+
+  <!-- by category -->
+  <div class="section-header">By category</div>
+  <table class="cat-table">
+    <thead>
+      <tr>
+        <th>Category</th>
+        <th>Count</th>
+        <th>Avg strength</th>
+        <th class="cat-bar-cell">Distribution</th>
+      </tr>
+    </thead>
+    <tbody>
+      <template x-for="c in (stats.by_category || [])" :key="c.category">
+        <tr>
+          <td>
+            <span class="cat-badge" :class="'cat-' + c.category" x-text="c.category"></span>
+          </td>
+          <td x-text="c.count"></td>
+          <td x-text="c.avg_strength.toFixed(3)"></td>
+          <td class="cat-bar-cell">
+            <div class="cat-bar-bg">
+              <div class="cat-bar-fg"
+                   :style="'width:' + Math.round(c.count / catMaxCount() * 100) + '%'"></div>
+            </div>
+          </td>
+        </tr>
+      </template>
+      <template x-if="!stats.by_category?.length">
+        <tr><td colspan="4" class="empty">No data yet</td></tr>
+      </template>
+    </tbody>
+  </table>
+
+  <!-- by type -->
+  <div class="section-header">By memory type</div>
+  <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin-bottom:1.5rem">
+    <template x-for="t in (stats.by_type || [])" :key="t.type">
+      <div class="graph-box">
+        <div class="val" x-text="t.count"></div>
+        <div class="lbl" x-text="t.type"></div>
+      </div>
+    </template>
+  </div>
+
+  <!-- strength histogram -->
+  <div class="section-header">Strength distribution</div>
+  <div class="histogram">
+    <template x-for="(count, i) in (stats.strength_histogram?.buckets || [])" :key="i">
+      <div class="hist-col">
+        <div class="hist-bar"
+             :style="'height:' + histBarPct(count) + '%'"
+             :title="(stats.strength_histogram?.labels[i] || '') + ': ' + count"></div>
+        <div class="hist-label" x-text="stats.strength_histogram?.labels[i]"></div>
+      </div>
+    </template>
+  </div>
+
+  <!-- graph stats -->
+  <div class="section-header">Memory graph</div>
+  <div class="graph-boxes">
+    <div class="graph-box">
+      <div class="val" x-text="stats.graph?.cue_nodes ?? '…'"></div>
+      <div class="lbl">Cue nodes</div>
+    </div>
+    <div class="graph-box">
+      <div class="val" x-text="stats.graph?.cue_edges ?? '…'"></div>
+      <div class="lbl">Cue edges</div>
+    </div>
+    <div class="graph-box">
+      <div class="val" x-text="stats.graph?.assoc_edges ?? '…'"></div>
+      <div class="lbl">Assoc edges</div>
+    </div>
+    <div class="graph-box">
+      <div class="val" x-text="stats.graph?.situation_edges ?? '…'"></div>
+      <div class="lbl">Situation edges</div>
+    </div>
+  </div>
+
+  <!-- daily formations -->
+  <template x-if="stats.daily_formations?.length">
+    <div>
+      <div class="section-header">Formations — last 7 days</div>
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+        <template x-for="d in stats.daily_formations" :key="d.day">
+          <div class="graph-box" style="min-width:90px">
+            <div class="val" style="font-size:1.2rem;color:var(--green)" x-text="d.count"></div>
+            <div class="lbl" x-text="d.day"></div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </template>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     ACTIVITY TAB
+════════════════════════════════════════════════════════════════════════════ -->
+<div x-show="tab === 'activity'" class="panel">
+  <template x-if="!activityLoaded">
+    <div class="loading">Loading activity…</div>
+  </template>
+  <template x-if="activityLoaded && activity.length === 0">
+    <div class="empty">No turn activity recorded yet.</div>
+  </template>
+  <div class="activity-list" x-show="activityLoaded && activity.length">
+    <template x-for="t in activity" :key="t.turn_id">
+      <div class="turn-row">
+        <span class="turn-time" x-text="fmtTime(t.created_at_ms)"></span>
+        <span class="turn-session" x-text="fmtShort(t.session_id)"></span>
+        <span class="turn-served">served: <strong x-text="t.memories_served.length"></strong></span>
+        <span class="turn-used">used: <strong x-text="t.memories_used.length"></strong></span>
+        <span class="turn-cues" x-text="t.cues_fired.length ? 'cues: ' + t.cues_fired.slice(0,8).join(', ') : ''"></span>
+      </div>
+    </template>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     LOGS TAB
+════════════════════════════════════════════════════════════════════════════ -->
+<div x-show="tab === 'logs'" style="display:flex;flex-direction:column">
+  <div class="log-toolbar">
+    <label>
+      <input type="checkbox" x-model="logAutoScroll"> Auto-scroll
+    </label>
+    <button @click="clearLogs()">Clear</button>
+    <span style="color:var(--dim);font-size:.78rem" x-text="logEntries.length + ' entries'"></span>
+    <span style="color:var(--dim);font-size:.78rem">— polls every 3s —</span>
+  </div>
+  <div class="log-output" x-ref="logOutput">
+    <template x-if="logEntries.length === 0">
+      <div class="empty" style="padding:1.5rem">No log entries yet. Activity will appear here.</div>
+    </template>
+    <template x-for="(e, i) in logEntries" :key="i">
+      <div class="log-line" :class="logLevelClass(e.level)">
+        <span class="log-ts" x-text="fmtLogTs(e.ts)"></span>
+        <span class="log-level" x-text="e.level"></span>
+        <span class="log-logger" x-text="e.logger"></span>
+        <span class="log-msg" x-text="e.message"></span>
+      </div>
+    </template>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     MEMORY DETAIL MODAL
+════════════════════════════════════════════════════════════════════════════ -->
+<div class="overlay" x-show="detail" x-cloak @click.self="closeDetail()">
+  <div class="modal" x-show="detail" @click.stop>
+    <button class="modal-close" @click="closeDetail()">✕</button>
+
+    <template x-if="detail">
+      <div>
+        <h3 x-text="detail.id"></h3>
+
+        <!-- badges -->
+        <div class="mem-head" style="margin-bottom:.75rem">
+          <span class="cat-badge" :class="'cat-' + detail.category" x-text="detail.category"></span>
+          <span class="mem-type" x-text="detail.memory_type"></span>
+          <template x-if="detail.probationary"><span class="tag-p">probationary</span></template>
+          <template x-if="detail.archived"><span class="tag-a">archived</span></template>
+          <template x-if="detail.locked"><span class="tag-l">🔒 encrypted</span></template>
+        </div>
+
+        <!-- content -->
+        <div class="modal-content" x-text="detail.content"></div>
+
+        <!-- metrics grid -->
+        <div class="detail-grid">
+          <div class="detail-box">
+            <label>Base strength</label>
+            <span x-text="detail.base_strength"></span>
+          </div>
+          <div class="detail-box">
+            <label>Current level</label>
+            <span x-text="detail.current_level"></span>
+          </div>
+          <div class="detail-box">
+            <label>Decay rate</label>
+            <span x-text="detail.decay_rate"></span>
+          </div>
+          <div class="detail-box">
+            <label>Age</label>
+            <span x-text="detail.age_days + ' days'"></span>
+          </div>
+          <div class="detail-box">
+            <label>Use count</label>
+            <span x-text="detail.use_count"></span>
+          </div>
+          <div class="detail-box">
+            <label>Created</label>
+            <span x-text="fmtTime(detail.created_at_ms)" style="font-size:.76rem"></span>
+          </div>
+          <div class="detail-box">
+            <label>Last access</label>
+            <span x-text="fmtTime(detail.last_access_ms)" style="font-size:.76rem"></span>
+          </div>
+          <template x-if="detail.archived_at_ms">
+            <div class="detail-box">
+              <label>Archived at</label>
+              <span x-text="fmtTime(detail.archived_at_ms)" style="font-size:.76rem"></span>
+            </div>
+          </template>
+        </div>
+
+        <!-- cue edges -->
+        <template x-if="detail.cue_edges?.length">
+          <div>
+            <div class="section-label">
+              Cue edges (<span x-text="detail.cue_edges.length"></span>)
+            </div>
+            <div class="cue-list">
+              <template x-for="c in detail.cue_edges" :key="c.cue_id">
+                <span class="cue-tag" :class="c.candidate ? 'candidate' : ''"
+                      :title="'weight: ' + c.weight + ' | fires: ' + c.fire_count + ' | uses: ' + c.use_count">
+                  <span x-text="c.cue_id"></span>
+                  <span style="color:var(--dim);font-size:.65rem" x-text="' ' + c.weight.toFixed(2)"></span>
+                </span>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <!-- association edges -->
+        <template x-if="detail.association_edges?.length">
+          <div>
+            <div class="section-label">
+              Associated memories (<span x-text="detail.association_edges.length"></span>)
+            </div>
+            <div class="assoc-list">
+              <template x-for="a in detail.association_edges" :key="a.neighbor">
+                <div class="assoc-row">
+                  <span class="neighbor" x-text="fmtShort(a.neighbor)"></span>
+                  <span style="color:var(--dim)">w=<span x-text="a.weight.toFixed(3)"></span></span>
+                  <span style="color:var(--dim)">co-use=<span x-text="a.co_use"></span></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <!-- actions -->
+        <div class="action-row">
+          <button class="btn-danger" @click="deleteMemory(detail.id)">Delete</button>
+          <button class="btn-warning" x-show="!detail.archived"
+                  @click="archiveMemory(detail.id)">Archive</button>
+        </div>
+      </div>
+    </template>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
