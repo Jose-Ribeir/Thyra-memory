@@ -44,11 +44,24 @@ _QUESTION_RE = re.compile(
 # Specificity markers: proper nouns, file paths, first/second-person referents, project nouns.
 # A question containing these is user-specific, not a generic factual lookup.
 _SPECIFIC_TOKEN_RE = re.compile(
-    r"\b(?:our|my|your|the|this|that)\s+\w+"  # possessive/demonstrative + noun
+    r"\b(?:our|my|your|this|that)\s+\w+"  # possessive/demonstrative + noun ("the" removed — too broad)
     r"|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+"  # multi-word proper noun
     r"|[A-Za-z]:\\[^\s]{3,}"  # Windows path
     r"|/[a-z][a-zA-Z0-9_/.-]{3,}"  # Unix path
     r"|\b\w+\.(?:py|ts|js|json|yaml|toml|md)\b",  # filename
+)
+
+# ── Agent self-state narration veto (source="agent" only) ────────────────────
+# Matches Claude transitional sentences that describe its own cognitive state
+# rather than stating a durable fact: "I have the full picture now", "I'm ready",
+# "I understand the problem". These are session-local narration, not memories.
+# Applied only when source="agent" — user self-disclosures ("I have 10 years of
+# experience") are genuine and must not be filtered.
+_AGENT_SELF_STATE_RE = re.compile(
+    r"^I(?:'ve| have) (?:the |a |now\b|everything\b|enough\b|all )"
+    r"|^I(?:'m| am) (?:now\b|ready\b|able )"
+    r"|^I (?:understand|see|realize|notice) (?:the |this |now\b|that (?:I|the|this))",
+    re.IGNORECASE,
 )
 
 # ── Research / agent-work signals ─────────────────────────────────────────────
@@ -146,6 +159,19 @@ def _is_vetoed(clause: str) -> bool:
     return False
 
 
+# Matches clauses whose only directive signal is "always"/"never" with no other
+# unambiguous directive word. Used to gate the directive score by source: agent
+# observations ("The loop never ran") must not score as directives.
+_ALWAYS_NEVER_ONLY_RE = re.compile(
+    r"\b(?:always|never)\b",
+    re.IGNORECASE,
+)
+_STRONG_DIRECTIVE_RE = re.compile(
+    r"\b(?:remember|from now on|make sure|please note|important|note that|"
+    r"keep in mind|don't forget|be aware|going forward)\b",
+    re.IGNORECASE,
+)
+
 # Weights
 # Note: _SELF_DISCLOSURE_W must be >= SALIENCE_THRESHOLD so that plain
 # preference statements ("I prefer X", "I use Y") can form memories on their own.
@@ -181,6 +207,11 @@ def compute_salience(clause: str, source: str = "user") -> float:
     # Runs for both source="user" and source="agent".
     if _is_vetoed(clause):
         return 0.0
+    # Agent self-state narration: Claude describing its own cognitive state
+    # ("I have the full picture now", "I'm ready", "I understand the problem")
+    # is session-local narration, not a durable cross-session fact.
+    if source == "agent" and _AGENT_SELF_STATE_RE.match(clause.strip()):
+        return 0.0
 
     score = 0.0
     if has_specific:
@@ -188,15 +219,28 @@ def compute_salience(clause: str, source: str = "user") -> float:
         # the question form is irrelevant when the clause references something real.
         score += _SPECIFIC_QUESTION_W
     if _DIRECTIVE_RE.search(clause):
-        score += _DIRECTIVE_W
+        # "always"/"never" in agent text are almost always observational
+        # ("The hook never fires"), not directives. Only apply the directive
+        # score weight when the clause has an unambiguous directive keyword
+        # (remember, make sure, …) OR when the source is the user.
+        if (
+            _STRONG_DIRECTIVE_RE.search(clause)
+            or source == "user"
+            or not _ALWAYS_NEVER_ONLY_RE.search(clause)
+        ):
+            score += _DIRECTIVE_W
     if _SELF_DISCLOSURE_RE.search(clause):
         score += _SELF_DISCLOSURE_W
     if _NAMED_ENTITY_RE.search(clause):
         score += _NAMED_ENTITY_W
     if _CORRECTION_RE.search(clause):
         score += _CORRECTION_W
-    if _AGENT_FINDING_RE.search(clause):
-        score += _AGENT_FINDING_W
+    m_finding = _AGENT_FINDING_RE.search(clause)
+    if m_finding:
+        # Require ≥ 3 words after the trigger phrase so short status updates
+        # ("The problem is clear", "The fix is done") don't score as findings.
+        if len(clause[m_finding.end() :].strip().split()) >= 3:
+            score += _AGENT_FINDING_W
     if _TECHNICAL_REF_RE.search(clause):
         score += _TECHNICAL_REF_W
     # Agent-sourced text gets a small base bump: a sentence the assistant

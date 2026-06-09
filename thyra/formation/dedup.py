@@ -27,11 +27,11 @@ _DURABLE_CATEGORIES = frozenset({"constraints", "identity", "preferences"})
 
 # Directive keywords: when present in content, the memory gets a higher base strength
 # so one-shot user instructions survive even if never explicitly re-cited.
+# "always"/"never" are intentionally excluded: they also appear in observations
+# ("the loop never ran") and would inflate base_strength for junk memories.
 _DIRECTIVE_WORDS = frozenset(
     {
         "remember",
-        "always",
-        "never",
         "from now on",
         "make sure",
         "please note",

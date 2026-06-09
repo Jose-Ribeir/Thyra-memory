@@ -133,7 +133,7 @@ def run_formation_pipeline(
             # fast=True uses FTS5 + word-overlap only (no ML model load).
             # The formation pipeline runs in a background thread where a blocking
             # model load would stall the worker; the fast path is sufficient here.
-            existing = find_near_match(conn, content, user_id, agent_id, fast=True)
+            existing = find_near_match(conn, content, user_id, agent_id, fast=False)
             if existing:
                 new_strength = min(
                     STRENGTH_CAP, existing.base_strength + SURFACED_BOOST
@@ -255,7 +255,10 @@ _NARRATION_PREFIX_RE = re.compile(
     r"^(?:"
     r"let me\b|let's\b|now i\b|i'll\b|i will\b|i need to\b|i should\b|"
     r"first[,\s]|next[,\s]|looking at\b|let me check\b|now let me\b|"
-    r"i'm (?:going to|now|about to)\b|to do this\b|starting with\b"
+    r"i'm (?:going to|now|about to)\b|to do this\b|starting with\b|"
+    r"i have (?:the|a|everything|enough|all)\b|"
+    r"i(?:'ve| have) (?:got|confirmed|verified|checked|now)\b|"
+    r"good[,.]?\s+(?:i|now)\b"
     r")",
     re.IGNORECASE,
 )
@@ -359,6 +362,16 @@ def _build_text_parts(delta: DeltaEvent) -> tuple[str, str]:
     boost there, not as a hard entry gate.
     """
     user_text = _clean_for_formation(delta.raw_user_text or "")
+    # Apply the same per-sentence noise gate that agent text goes through — catches
+    # code-heavy fragments, tool output that slipped past _clean_for_formation, and
+    # narration-prefix patterns.
+    if user_text:
+        _user_sentences = re.split(r"(?<=[.!?])\s+", user_text)
+        user_text = "\n".join(
+            s.strip()
+            for s in _user_sentences
+            if s.strip() and not _is_noise_sentence(s.strip())
+        )
 
     agent_parts: list[str] = []
     if delta.raw_assistant_text:

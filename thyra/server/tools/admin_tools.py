@@ -120,6 +120,21 @@ def register_admin_tools(mcp) -> None:
                 STRENGTH_CAP,
             )
             from thyra.server.tools._context import get_current_project_id
+            from thyra.formation.pipeline import _is_noise_sentence
+
+            # Basic quality gate: reject tool output, code fragments, or trivially
+            # short content before it reaches the DB with full explicit strength.
+            stripped = content.strip()
+            if len(stripped) < 15:
+                return {
+                    "success": False,
+                    "error": "Content too short to be a useful memory.",
+                }
+            if _is_noise_sentence(stripped):
+                return {
+                    "success": False,
+                    "error": "Content looks like noise (tool output, code fragment, or narration) — not saved.",
+                }
 
             agent_id = get_current_project_id()
             conn = get_conn()

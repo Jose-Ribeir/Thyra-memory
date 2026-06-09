@@ -125,23 +125,31 @@ def main() -> None:
 
 def _content_to_text(content) -> str:
     if isinstance(content, list):
-        parts: list[str] = []
+        # Prefer text blocks — these are the user's actual speech.
+        # Tool-result blocks travel as user-role messages but are not user speech;
+        # mixing them in causes tool output to be treated as user text for formation.
+        # Only fall back to tool_result content when there are no text blocks at all.
+        text_parts = [
+            str(b.get("text", ""))
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        if text_parts:
+            return " ".join(p for p in text_parts if p)
+        tool_parts: list[str] = []
         for block in content:
-            if not isinstance(block, dict):
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
                 continue
-            if block.get("type") == "text":
-                parts.append(str(block.get("text", "")))
-            elif block.get("type") == "tool_result":
-                inner = block.get("content", "")
-                if isinstance(inner, list):
-                    parts.extend(
-                        str(c.get("text", ""))
-                        for c in inner
-                        if isinstance(c, dict) and c.get("type") == "text"
-                    )
-                else:
-                    parts.append(str(inner))
-        return " ".join(p for p in parts if p)
+            inner = block.get("content", "")
+            if isinstance(inner, list):
+                tool_parts.extend(
+                    str(c.get("text", ""))
+                    for c in inner
+                    if isinstance(c, dict) and c.get("type") == "text"
+                )
+            else:
+                tool_parts.append(str(inner))
+        return " ".join(p for p in tool_parts if p)
     return str(content or "")
 
 
@@ -258,6 +266,11 @@ def _is_tool_result_text(text: str) -> bool:
         "Queue",
         "Total lines:",
         "===",
+        "Killed ",
+        "Sending ",
+        "Running ",
+        "Starting ",
+        "Exit code",
     )
     for marker in tool_markers:
         if text.startswith(marker):
