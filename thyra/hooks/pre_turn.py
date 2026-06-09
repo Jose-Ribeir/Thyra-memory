@@ -170,8 +170,29 @@ def main() -> None:
         agent_id = resolve_project_id(cwd)
 
         # CCD: when cwd="" the hook receives no path, so resolve_project_id falls
-        # back to "global".  Recover the correct project_id that the MCP server
-        # wrote at startup before we overwrite ctx_latest.json below.
+        # back to "global".  First try the session_id — each transcript lives at
+        # ~/.claude/projects/<proj-dir>/<session_id>.jsonl, so this lookup is
+        # unambiguous and immune to stale context from a previous project.
+        if agent_id in ("global", "unknown"):
+            if session_id not in ("unknown", ""):
+                try:
+                    from thyra.server.tools.admin_tools import (
+                        _agent_id_from_project_dir_name,
+                    )
+
+                    _projects_dir = pathlib.Path.home() / ".claude" / "projects"
+                    for _pdir in _projects_dir.iterdir():
+                        if _pdir.is_dir() and (_pdir / f"{session_id}.jsonl").exists():
+                            _recovered = _agent_id_from_project_dir_name(_pdir.name)
+                            if _recovered and _recovered not in ("global", "unknown"):
+                                agent_id = _recovered
+                                break
+                except Exception:
+                    pass
+
+        # Fallback: read the last-written project context file.  This can be
+        # stale when the previous session was in a different project, so it is
+        # only used when the session_id lookup above found nothing.
         if agent_id in ("global", "unknown"):
             _ctx_p = os.path.join(
                 os.environ.get("TEMP", tempfile.gettempdir()),
