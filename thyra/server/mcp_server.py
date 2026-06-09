@@ -4,12 +4,17 @@ Starts the BackgroundWorker consolidation thread at import time, then
 serves MCP tools over stdio transport.
 
 Memory injection is fully automatic:
-  - At startup, memories for the current project are loaded and embedded in
-    mcp.instructions, so Claude sees them in the system prompt without any
-    tool call.
+  - The UserPromptSubmit hook (pre_turn.py) runs before every message, scores
+    memories for the current project, and injects them as additionalContext.
   - A background transcript monitor thread polls the Claude transcript file
     every 10 seconds and queues a delta event whenever a new completed turn
     is detected, so memory formation is also fully automatic.
+
+Note: we do NOT inject memories into mcp.instructions at startup.  The MCP
+server is often launched from C:\\Windows\\System32 (CCD), so the CWD is
+unreliable and any startup injection would use a stale/wrong project context.
+All recall goes through the per-turn hook which resolves the project from the
+session_id → transcript path lookup.
 """
 
 from __future__ import annotations
@@ -38,8 +43,7 @@ _BASE_INSTRUCTIONS = (
     "  <memories_used></memories_used>              — if you used none\n"
     "This tag is parsed by the formation pipeline for reinforcement.\n\n"
     "CCD (Claude Desktop App): the Stop hook does NOT fire in CCD. "
-    "Call thyra_end_turn at the end of every response, passing memories_used. "
-    "Do NOT call thyra_init_session — injection is automatic at startup."
+    "Call thyra_end_turn at the end of every response, passing memories_used."
 )
 
 mcp = FastMCP(
@@ -323,57 +327,6 @@ def _init_context() -> None:
         logging.getLogger("thyra").debug("Could not write startup context: %s", e)
 
 
-def _load_startup_memories(agent_id: str) -> str:
-    """Load memories for *agent_id* and return a formatted <thyra_memories> XML block.
-
-    Uses the same direct SQL query as thyra_init_session — intentionally fast,
-    no ML scoring.  Returns an empty string if there are no qualifying memories
-    or if any error occurs.
-    """
-    try:
-        import datetime
-        import math
-        import time
-
-        from thyra.config import THYRA_USER_ID as U
-        from thyra.db.connection import get_conn
-
-        conn = get_conn()
-        rows = conn.execute(
-            """SELECT id, content, category, base_strength, decay_rate, last_access
-               FROM memories
-               WHERE user_id=? AND agent_id=? AND archived=0
-               ORDER BY base_strength DESC
-               LIMIT 20""",
-            (U, agent_id),
-        ).fetchall()
-
-        now_ms = int(time.time() * 1000)
-        lines: list[str] = []
-        for r in rows:
-            age_days = max(0.0, (now_ms - r["last_access"]) / 86_400_000)
-            level = r["base_strength"] * math.exp(-r["decay_rate"] * age_days)
-            if level < 0.05:
-                continue  # skip nearly-forgotten memories
-            lines.append(
-                f'[MEMORY id="{r["id"]}" cat="{r["category"]}" '
-                f'strength="{r["base_strength"]:.2f}" age_days="{int(age_days)}"]\n'
-                f"{r['content']}\n[/MEMORY]"
-            )
-
-        if not lines:
-            return ""
-
-        ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-        return (
-            f'<thyra_memories agent="{agent_id}" retrieved_at="{ts}">\n'
-            + "\n".join(lines)
-            + "\n</thyra_memories>"
-        )
-    except Exception:
-        return ""
-
-
 def _start_transcript_monitor(initial_agent_id: str) -> None:
     """Start a daemon thread that auto-queues delta events from the transcript.
 
@@ -545,7 +498,7 @@ if __name__ == "__main__":
     # 1. Write startup context (skips system-directory CWDs automatically)
     _init_context()
 
-    # 2. Resolve agent_id for memory loading and the transcript monitor.
+    # 2. Resolve agent_id for the transcript monitor.
     #    _resolve_startup_agent_id() falls back to the last known good project
     #    when the MCP server was launched from a system directory.
     try:
@@ -553,18 +506,16 @@ if __name__ == "__main__":
     except Exception:
         _agent_id = "claude-code-global"
 
-    # 3. Inject startup memories into mcp.instructions before mcp.run() sends
-    #    its initialize response — Claude Desktop App reads instructions from
-    #    the initialize response and shows them as system context automatically.
-    _memories_xml = _load_startup_memories(_agent_id)
-    if _memories_xml:
-        mcp.instructions = _BASE_INSTRUCTIONS + "\n\n" + _memories_xml
-
-    # 4. Start background workers
+    # 3. Start background workers
+    #    Note: memory recall is handled entirely by the UserPromptSubmit hook
+    #    (pre_turn.py) which runs per-turn with the correct session-scoped
+    #    agent_id.  We do NOT inject memories into mcp.instructions at startup
+    #    because the server CWD is unreliable (often C:\Windows\System32 in CCD)
+    #    and any startup injection would use a stale/wrong project context.
     _start_worker()
     _start_transcript_monitor(_agent_id)
     _start_dashboard()
     _start_tray()
 
-    # 5. Run MCP server — this blocks until Claude closes the connection
+    # 4. Run MCP server — this blocks until Claude closes the connection
     mcp.run(transport="stdio")
