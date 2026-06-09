@@ -42,8 +42,15 @@ _BASE_INSTRUCTIONS = (
     "  <memories_used>m_id1,m_id2</memories_used>  — IDs of memories you relied on\n"
     "  <memories_used></memories_used>              — if you used none\n"
     "This tag is parsed by the formation pipeline for reinforcement.\n\n"
-    "CCD (Claude Desktop App): the Stop hook does NOT fire in CCD. "
-    "Call thyra_end_turn at the end of every response, passing memories_used."
+    "CCD (Claude Desktop App): the Stop hook does NOT fire in CCD.\n"
+    "1. At the START of every new conversation call:\n"
+    "     thyra_init_session(cwd='<project working directory>')\n"
+    "   You can read the CWD from the path of your CLAUDE.md shown in your "
+    "system context (e.g. 'Contents of J:\\\\codigo\\\\thyra-ai\\\\CLAUDE.md' "
+    "means cwd='J:\\\\codigo\\\\thyra-ai'). This scopes all memories to the "
+    "correct project and returns the relevant memories — treat the returned "
+    "memories_xml exactly like an injected <thyra_memories> block.\n"
+    "2. At the END of every response call thyra_end_turn(memories_used='...')."
 )
 
 mcp = FastMCP(

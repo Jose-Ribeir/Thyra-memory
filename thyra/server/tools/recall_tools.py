@@ -10,8 +10,7 @@ def register_recall_tools(mcp) -> None:
     def thyra_init_session(cwd: str = "") -> dict:
         """Initialize Thyra memory context for this conversation and return relevant memories.
 
-        CALL THIS AT THE START OF EVERY NEW CONVERSATION when no <thyra_memories> block
-        was automatically injected (normal in Claude Desktop App / CCD mode).
+        CALL THIS AT THE START OF EVERY NEW CONVERSATION (CCD / Claude Desktop App).
 
         Pass the current project working directory so memories are scoped to the
         right repo. Returns the full memories XML block — read it and treat it
@@ -20,7 +19,9 @@ def register_recall_tools(mcp) -> None:
         Args:
             cwd: Project working directory, e.g. 'J:\\\\codigo\\\\thyra-ai'
         """
+        import json
         import os
+        import tempfile
         import time
         import uuid
 
@@ -31,7 +32,21 @@ def register_recall_tools(mcp) -> None:
 
         try:
             agent_id = resolve_project_id(cwd.strip()) if cwd.strip() else "global"
-            session_id = f"mcp-init:{int(time.time() * 1000)}"
+
+            # Preserve the real session_id written by the UserPromptSubmit hook so
+            # thyra_end_turn can find the correct turn-state file.  Only fall back
+            # to a synthetic id when no prior context exists (first ever turn).
+            ctx_path = os.path.join(
+                os.environ.get("TEMP", tempfile.gettempdir()),
+                "thyra_ctx_latest.json",
+            )
+            existing_session_id = ""
+            try:
+                with open(ctx_path, encoding="utf-8") as _f:
+                    existing_session_id = json.load(_f).get("session_id", "")
+            except Exception:
+                pass
+            session_id = existing_session_id or f"mcp-init:{int(time.time() * 1000)}"
 
             # Update context file so all subsequent MCP tool calls in this
             # conversation automatically use the correct project namespace.
