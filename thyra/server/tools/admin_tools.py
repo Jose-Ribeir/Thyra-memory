@@ -466,6 +466,30 @@ def register_admin_tools(mcp) -> None:
 
                 assistant_text, user_text = _extract_last_messages(transcript_path)
 
+            # Fallback: if no turn state file was found (pre_turn hook didn't fire —
+            # common in Cursor IDE and CCD), run recall_pipeline now using the user
+            # text we just extracted.  This gives us a real served_ids set so the
+            # declared ∩ served anti-spoof check has something to intersect with.
+            if not served_ids and user_text:
+                try:
+                    from thyra.db.connection import get_conn as _get_conn
+                    from thyra.recall.intent import recall_pipeline as _recall
+
+                    _conn = _get_conn()
+                    _xml, served_ids = _recall(
+                        _conn,
+                        U,
+                        agent_id,
+                        user_text,
+                        session_id,
+                        turn_id,
+                    )
+                    from thyra.recall.cue_extractor import extract_cues as _ec
+
+                    cues_fired = _ec(user_text)
+                except Exception:
+                    pass
+
             # Parse declared IDs passed explicitly by the model
             declared_ids = [
                 x.strip()

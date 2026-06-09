@@ -40,6 +40,7 @@ def run_nightly_sweep(
     summary["archived"] = _archive_below_threshold(conn, user_id, agent_id, now_ms)
     summary["hard_deleted"] = _hard_delete_old_archived(conn, user_id, agent_id, now_ms)
     summary["cue_edges_pruned"] = _prune_cue_edges(conn, user_id, agent_id)
+    summary["hub_cue_edges_pruned"] = _prune_hub_cue_edges(conn, user_id, agent_id)
     summary["orphan_cues_pruned"] = _prune_orphan_cues(conn, user_id, agent_id)
     summary["assoc_edges_pruned"] = _decay_and_prune_assoc_edges(
         conn, user_id, agent_id
@@ -154,6 +155,49 @@ def _prune_cue_edges(
     from thyra.consolidation.edges import prune_weak_cue_edges
 
     return prune_weak_cue_edges(conn, user_id, agent_id)
+
+
+def _prune_hub_cue_edges(
+    conn: sqlite3.Connection,
+    user_id: str,
+    agent_id: str,
+) -> int:
+    """Delete cue edges for hub cues (df > HUB_CUE_FRACTION * M).
+
+    Hub cues appear in too many memories to be discriminative — IDF pushes
+    their recall contribution near zero. Removing their edges keeps
+    load_cue_edge_map lean and avoids wasted scoring iterations.
+    """
+    try:
+        from thyra.categories.crystallizer import _find_hub_cues
+
+        hub_cues = _find_hub_cues(conn, user_id, agent_id)
+        if not hub_cues:
+            return 0
+        placeholders = ",".join("?" * len(hub_cues))
+        # Decrement df in cue_nodes before deleting the edges
+        rows = conn.execute(
+            f"""SELECT cue_id, COUNT(*) as cnt FROM cue_edges
+                WHERE cue_id IN ({placeholders}) AND user_id=? AND agent_id=?
+                GROUP BY cue_id""",
+            (*hub_cues, user_id, agent_id),
+        ).fetchall()
+        with conn:
+            for row in rows:
+                conn.execute(
+                    "UPDATE cue_nodes SET df = CASE WHEN df < ? THEN 0 ELSE df - ? END"
+                    " WHERE cue_id=? AND user_id=? AND agent_id=?",
+                    (row["cnt"], row["cnt"], row["cue_id"], user_id, agent_id),
+                )
+            cur = conn.execute(
+                f"""DELETE FROM cue_edges WHERE cue_id IN ({placeholders})
+                    AND user_id=? AND agent_id=?""",
+                (*hub_cues, user_id, agent_id),
+            )
+        return cur.rowcount
+    except Exception as exc:
+        log.warning("Hub cue edge pruning error: %s", exc)
+        return 0
 
 
 def _prune_orphan_cues(

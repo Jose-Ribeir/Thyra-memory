@@ -27,7 +27,7 @@ def _find_hub_cues(
         (user_id, agent_id),
     ).fetchone()
     M = row[0] if row else 0
-    if M == 0:
+    if M < 2:
         return set()
     threshold = int(M * HUB_CUE_FRACTION)
     rows = conn.execute(

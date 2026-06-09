@@ -14,11 +14,33 @@ from thyra.config import (
     HEBBIAN_MIN_CO_USE,
     HEBBIAN_WEIGHT_DELTA,
     ASSOC_WEIGHT_CAP,
+    HUB_CUE_FRACTION,
     THYRA_AGENT_ID,
     THYRA_USER_ID,
 )
 from thyra.models.delta import DeltaEvent
 from thyra.models.memory import upsert_assoc_edge
+
+
+def _hub_cues(
+    conn: sqlite3.Connection,
+    user_id: str,
+    agent_id: str,
+) -> set[str]:
+    """Return cue_ids whose df exceeds HUB_CUE_FRACTION * M (non-discriminative)."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE user_id=? AND agent_id=? AND archived=0",
+        (user_id, agent_id),
+    ).fetchone()
+    M = row[0] if row else 0
+    if M < 2:
+        return set()
+    threshold = int(M * HUB_CUE_FRACTION)
+    rows = conn.execute(
+        "SELECT cue_id FROM cue_nodes WHERE user_id=? AND agent_id=? AND df > ?",
+        (user_id, agent_id, threshold),
+    ).fetchall()
+    return {r["cue_id"] for r in rows}
 
 
 def update_cue_edges(
@@ -29,6 +51,9 @@ def update_cue_edges(
 
     Also fires the cue's fire_count for ALL cues that were present (whether
     the memory was used or not), and increments use_count for used pairs.
+    Hub cues (appearing in >HUB_CUE_FRACTION of memories) are excluded from
+    weight updates — their fire_count still ticks so weak-rate pruning can
+    eventually remove them.
     """
     user_id = delta.user_id
     agent_id = delta.agent_id
@@ -39,6 +64,7 @@ def update_cue_edges(
         return
 
     now = int(time.time() * 1000)
+    hub = _hub_cues(conn, user_id, agent_id)
 
     # Increment fire_count for all (cue, memory) pairs where cue was fired
     if cues:
@@ -49,8 +75,10 @@ def update_cue_edges(
             (*cues, user_id, agent_id),
         )
 
-    # Strengthen edges for (cue, memory) pairs that were used
+    # Strengthen edges for (cue, memory) pairs that were used (skip hub cues)
     for cue in cues:
+        if cue in hub:
+            continue
         for mem_id in used_set:
             # Check if this cue edge exists
             row = conn.execute(
@@ -107,8 +135,9 @@ def prune_weak_cue_edges(
 
     for cue_id, decr in df_decrements.items():
         conn.execute(
-            "UPDATE cue_nodes SET df = MAX(0, df - ?) WHERE cue_id=? AND user_id=? AND agent_id=?",
-            (decr, cue_id, user_id, agent_id),
+            "UPDATE cue_nodes SET df = CASE WHEN df < ? THEN 0 ELSE df - ? END"
+            " WHERE cue_id=? AND user_id=? AND agent_id=?",
+            (decr, decr, cue_id, user_id, agent_id),
         )
 
     return pruned

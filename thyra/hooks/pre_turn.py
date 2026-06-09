@@ -169,6 +169,22 @@ def main() -> None:
         user_id = os.environ.get("THYRA_USER_ID", "default")
         agent_id = resolve_project_id(cwd)
 
+        # CCD: when cwd="" the hook receives no path, so resolve_project_id falls
+        # back to "global".  Recover the correct project_id that the MCP server
+        # wrote at startup before we overwrite ctx_latest.json below.
+        if agent_id in ("global", "unknown"):
+            _ctx_p = os.path.join(
+                os.environ.get("TEMP", tempfile.gettempdir()),
+                "thyra_ctx_latest.json",
+            )
+            try:
+                with open(_ctx_p, encoding="utf-8") as _f:
+                    _saved = json.load(_f).get("project_id", "")
+                if _saved and _saved not in ("global", "unknown", ""):
+                    agent_id = _saved
+            except Exception:
+                pass
+
         # CCD: flush formation for the previous turn before overwriting context.
         _maybe_flush_prev_turn()
 
