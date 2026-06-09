@@ -1,0 +1,11 @@
+#!/bin/sh
+# Remove Co-Authored-By trailers from unpushed commits before push.
+set -e
+root="$(git rev-parse --show-toplevel)"
+
+cd "$root" && ruff format
+
+if command -v pwsh >/dev/null 2>&1; then
+  exec pwsh -NoProfile -ExecutionPolicy Bypass -File "$root/scripts/strip-coauthors.ps1"
+fi
+exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$root/scripts/strip-coauthors.ps1"
