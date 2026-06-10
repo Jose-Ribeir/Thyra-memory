@@ -135,6 +135,10 @@ async def get_status(
         (user_id, agent_id),
     ).fetchone()[0]
     last_nightly_raw = get_flag(conn, "last_nightly", user_id, agent_id, default="0")
+    import time as _t
+    now_ms = int(_t.time() * 1000)
+    last_ping = int(get_flag(conn, "last_monitor_ping", THYRA_USER_ID, THYRA_AGENT_ID, default="0") or "0")
+    monitor_ok = last_ping > 0 and (now_ms - last_ping) < 60_000
     return {
         "user_id": user_id,
         "agent_id": agent_id,
@@ -147,6 +151,8 @@ async def get_status(
         "active_memories": count_active(conn, user_id, agent_id),
         "archived_memories": archived,
         "last_nightly": int(last_nightly_raw or "0"),
+        "monitor_ok": monitor_ok,
+        "last_monitor_ping": last_ping,
     }
 
 

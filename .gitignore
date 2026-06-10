@@ -24,3 +24,6 @@ data/turn_state_*.json
 # Env
 .env
 *.env
+
+# Graphify
+graphify-out/

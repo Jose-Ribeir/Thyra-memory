@@ -138,11 +138,14 @@ def _maybe_flush_prev_turn() -> None:
         declared_ids = _parse_declared(assistant_text)
 
         db_path = os.environ.get("THYRA_DB_PATH", THYRA_DB_PATH)
+        _flush_agent_id = resolve_project_id(prev_cwd)
+        if _flush_agent_id in ("", "global", "unknown"):
+            return  # unresolved project — skip rather than pollute the global namespace
         delta = {
             "session_id": prev_session_id,
             "turn_id": turn_id,
             "user_id": os.environ.get("THYRA_USER_ID", "default"),
-            "agent_id": resolve_project_id(prev_cwd),
+            "agent_id": _flush_agent_id,
             "timestamp": int(time.time() * 1000),
             "memories_served": served_ids,
             "memories_declared": declared_ids,
@@ -220,6 +223,29 @@ def main() -> None:
         xml, served_ids = recall_pipeline(
             conn, user_id, agent_id, prompt, session_id, turn_id
         )
+
+        # CCD fallback: if project could not be resolved (agent_id stayed "global"),
+        # inject a mandatory reminder so Claude always calls thyra_init_session —
+        # otherwise additionalContext is "" and there is zero signal to trigger it.
+        if agent_id in ("global", "unknown"):
+            ctx_cwd = cwd
+            if not ctx_cwd:
+                try:
+                    _ctx_p = os.path.join(
+                        os.environ.get("TEMP", tempfile.gettempdir()),
+                        "thyra_ctx_latest.json",
+                    )
+                    with open(_ctx_p, encoding="utf-8") as _f:
+                        ctx_cwd = json.load(_f).get("cwd", "")
+                except Exception:
+                    pass
+            cwd_hint = f"cwd='{ctx_cwd}'" if ctx_cwd else "cwd='<project-working-directory>'"
+            init_reminder = (
+                f"[THYRA-INIT-REQUIRED] CCD mode: project scope not resolved. "
+                f"Your FIRST action MUST be thyra_init_session({cwd_hint}) "
+                f"before answering the user — do not skip this."
+            )
+            xml = (init_reminder + "\n" + xml) if xml else init_reminder
 
         output = {"additionalContext": xml}
 

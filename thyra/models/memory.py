@@ -137,6 +137,8 @@ def compute_base_level(
 
 # ── Memory CRUD ───────────────────────────────────────────────────────────────
 
+_BAD_AGENT_IDS = frozenset({"", "global", "unknown"})
+
 
 def create_memory(
     conn: sqlite3.Connection,
@@ -151,6 +153,11 @@ def create_memory(
     locked: bool = False,
     seed_cues: bool = True,
 ) -> str:
+    if agent_id in _BAD_AGENT_IDS:
+        raise ValueError(
+            f"create_memory() called with unresolved agent_id={agent_id!r}. "
+            "Ensure project ID is resolved before forming memories."
+        )
     mem_id = "m_" + uuid.uuid4().hex[:16]
     now = int(time.time() * 1000)
     chash = compute_content_hash(content) if not locked else None

@@ -14,11 +14,14 @@ from thyra.config import (
     STRENGTH_CAP,
     THYRA_AGENT_ID,
     THYRA_USER_ID,
+    WEAK_ADMIT_MARGIN,
 )
 from thyra.models.delta import DeltaEvent
 from thyra.models.memory import get_flag, update_memory_strength
 
 log = logging.getLogger("thyra.formation")
+
+_BAD_AGENT_IDS = frozenset({"", "global", "unknown"})
 
 
 def run_formation_pipeline(
@@ -31,6 +34,10 @@ def run_formation_pipeline(
     """
     user_id = delta.user_id
     agent_id = delta.agent_id
+
+    if agent_id in _BAD_AGENT_IDS:
+        log.warning("Skipping formation: unresolved agent_id=%r", agent_id)
+        return []
 
     # Formation master switch
     if get_flag(conn, "formation_enabled", user_id, agent_id).lower() != "true":
@@ -181,11 +188,7 @@ def run_formation_pipeline(
 
 
 # ── Weak-admit detection (L3) ────────────────────────────────────────────────────
-
-# Margin above SALIENCE_THRESHOLD within which an admit counts as "just over" the
-# bar.  A single weak positive signal (e.g. a bare self-disclosure at 0.42) lands
-# inside this band; any compounded or strong signal lands above it.
-_WEAK_ADMIT_MARGIN = 0.12
+# WEAK_ADMIT_MARGIN imported from config — shared contract with the salience gate (§9.5).
 
 
 def _is_weak_admit(candidate: dict, content: str) -> bool:
@@ -212,7 +215,7 @@ def _is_weak_admit(candidate: dict, content: str) -> bool:
         or _AGENT_FINDING_RE.search(content)
     ):
         return False
-    return candidate.get("salience", 0.0) <= SALIENCE_THRESHOLD + _WEAK_ADMIT_MARGIN
+    return candidate.get("salience", 0.0) <= SALIENCE_THRESHOLD + WEAK_ADMIT_MARGIN
 
 
 # ── Noise-gate patterns ────────────────────────────────────────────────────────

@@ -130,6 +130,12 @@ WEAK_ADMIT_DECAY = DECAY_EPISODIC  # 0.15, ~5-day half-life
 # L3 A-Mem-style auto-purge: probationary + use_count==0 + older than this window is
 # archived in the nightly sweep without waiting for the slow strength curve.
 PROBATIONARY_AUTOPURGE_DAYS = 7
+# Formation Precision Gate (§9.2) — shared contract between salience gate and weak-admit detector
+WEAK_ADMIT_MARGIN = 0.12  # band above SALIENCE_THRESHOLD that flags a borderline admit
+DURABLE_FRAMING_TERMS = (  # escape hatch: clauses with these survive the transience veto
+    "from now on", "always", "never", "i prefer",
+    "i usually", "i tend to", "going forward", "by default",
+)
 
 # ── Recall intent amplification ───────────────────────────────────────────────
 RECALL_INTENT_BUDGET_MULT = 1.5

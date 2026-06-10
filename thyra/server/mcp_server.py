@@ -43,14 +43,15 @@ _BASE_INSTRUCTIONS = (
     "  <memories_used></memories_used>              — if you used none\n"
     "This tag is parsed by the formation pipeline for reinforcement.\n\n"
     "CCD (Claude Desktop App): the Stop hook does NOT fire in CCD.\n"
-    "1. At the START of every new conversation call:\n"
-    "     thyra_init_session(cwd='<project working directory>')\n"
-    "   You can read the CWD from the path of your CLAUDE.md shown in your "
+    "At the START of every new conversation call:\n"
+    "  thyra_init_session(cwd='<project working directory>')\n"
+    "You can read the CWD from the path of your CLAUDE.md shown in your "
     "system context (e.g. 'Contents of J:\\\\codigo\\\\thyra-ai\\\\CLAUDE.md' "
     "means cwd='J:\\\\codigo\\\\thyra-ai'). This scopes all memories to the "
     "correct project and returns the relevant memories — treat the returned "
     "memories_xml exactly like an injected <thyra_memories> block.\n"
-    "2. At the END of every response call thyra_end_turn(memories_used='...')."
+    "Formation is handled automatically by a background transcript monitor — "
+    "do NOT call thyra_end_turn at the end of responses."
 )
 
 mcp = FastMCP(
@@ -351,6 +352,7 @@ def _start_transcript_monitor(initial_agent_id: str) -> None:
     def _run() -> None:
         import hashlib
         import json
+        import logging
         import os
         import tempfile
         import time
@@ -373,10 +375,19 @@ def _start_transcript_monitor(initial_agent_id: str) -> None:
         last_transcript: str = ""
         last_transcript_agent_id: str = ""  # agent_id resolved from transcript path
         _SETTLE_SECS = 8  # wait this many seconds after last write before queuing
+        _mlog = logging.getLogger("thyra.monitor")
 
         while True:
             time.sleep(10)
             try:
+                # Heartbeat — written every iteration so thyra_status() can detect a dead monitor.
+                try:
+                    from thyra.db.connection import get_conn as _get_conn_m
+                    from thyra.models.memory import set_flag as _set_flag_m
+                    _set_flag_m(_get_conn_m(), "last_monitor_ping", str(int(time.time() * 1000)))
+                except Exception:
+                    pass
+
                 # Re-read context on every iteration so project changes are picked up
                 ctx_path = os.path.join(
                     os.environ.get("TEMP", tempfile.gettempdir()),
@@ -494,8 +505,12 @@ def _start_transcript_monitor(initial_agent_id: str) -> None:
                 }
                 _enqueue_delta(delta, THYRA_DB_PATH)
 
-            except Exception:
-                pass  # monitor thread must never crash
+            except Exception as _exc:
+                _mlog.warning("thyra-transcript-monitor: poll error (will retry): %s", _exc)
+                last_mtime = 0.0
+                last_hash = ""
+                last_transcript = ""
+                last_transcript_agent_id = ""
 
     t = threading.Thread(target=_run, daemon=True, name="thyra-transcript-monitor")
     t.start()

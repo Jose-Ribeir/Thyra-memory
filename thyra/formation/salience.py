@@ -7,6 +7,7 @@ import sqlite3
 from typing import Sequence
 
 from thyra.config import (
+    DURABLE_FRAMING_TERMS,
     NOVELTY_THRESHOLD,
     SALIENCE_THRESHOLD,
     AGENT_SALIENCE_THRESHOLD,
@@ -110,8 +111,8 @@ _TRANSIENT_REQUEST_RE = re.compile(
 )
 # "Durable framing" that rescues an otherwise-transient clause (standing preference
 # or policy rather than a one-off ask).
-_DURABLE_FRAMING_RE = re.compile(
-    r"\b(?:from now on|always|never|i prefer|i (?:usually|tend to)|going forward|by default)\b",
+_DURABLE_FRAMING_RE = re.compile(  # §9.2 — vocabulary defined in config.DURABLE_FRAMING_TERMS
+    r"\b(?:" + "|".join(re.escape(t) for t in DURABLE_FRAMING_TERMS) + r")\b",
     re.IGNORECASE,
 )
 # Unresolved deixis: a pronoun/demonstrative referent with nothing to bind it to.

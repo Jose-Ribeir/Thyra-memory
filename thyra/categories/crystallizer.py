@@ -140,7 +140,11 @@ def _derive_label(memory_ids: set[str], conn: sqlite3.Connection) -> str:
     if not cats:
         return "context"
     most_common = Counter(cats).most_common(1)[0][0]
-    return most_common + "_cluster"
+    # Strip all accumulated _cluster suffixes so repeated runs don't compound them.
+    base = most_common
+    while base.endswith("_cluster"):
+        base = base[: -len("_cluster")]
+    return base + "_cluster"
 
 
 def detect_emergent_categories(
