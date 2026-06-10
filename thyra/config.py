@@ -133,8 +133,14 @@ PROBATIONARY_AUTOPURGE_DAYS = 7
 # Formation Precision Gate (§9.2) — shared contract between salience gate and weak-admit detector
 WEAK_ADMIT_MARGIN = 0.12  # band above SALIENCE_THRESHOLD that flags a borderline admit
 DURABLE_FRAMING_TERMS = (  # escape hatch: clauses with these survive the transience veto
-    "from now on", "always", "never", "i prefer",
-    "i usually", "i tend to", "going forward", "by default",
+    "from now on",
+    "always",
+    "never",
+    "i prefer",
+    "i usually",
+    "i tend to",
+    "going forward",
+    "by default",
 )
 
 # ── Recall intent amplification ───────────────────────────────────────────────

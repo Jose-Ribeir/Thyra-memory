@@ -239,7 +239,9 @@ def main() -> None:
                         ctx_cwd = json.load(_f).get("cwd", "")
                 except Exception:
                     pass
-            cwd_hint = f"cwd='{ctx_cwd}'" if ctx_cwd else "cwd='<project-working-directory>'"
+            cwd_hint = (
+                f"cwd='{ctx_cwd}'" if ctx_cwd else "cwd='<project-working-directory>'"
+            )
             init_reminder = (
                 f"[THYRA-INIT-REQUIRED] CCD mode: project scope not resolved. "
                 f"Your FIRST action MUST be thyra_init_session({cwd_hint}) "

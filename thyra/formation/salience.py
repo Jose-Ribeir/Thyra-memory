@@ -111,9 +111,11 @@ _TRANSIENT_REQUEST_RE = re.compile(
 )
 # "Durable framing" that rescues an otherwise-transient clause (standing preference
 # or policy rather than a one-off ask).
-_DURABLE_FRAMING_RE = re.compile(  # §9.2 — vocabulary defined in config.DURABLE_FRAMING_TERMS
-    r"\b(?:" + "|".join(re.escape(t) for t in DURABLE_FRAMING_TERMS) + r")\b",
-    re.IGNORECASE,
+_DURABLE_FRAMING_RE = (
+    re.compile(  # §9.2 — vocabulary defined in config.DURABLE_FRAMING_TERMS
+        r"\b(?:" + "|".join(re.escape(t) for t in DURABLE_FRAMING_TERMS) + r")\b",
+        re.IGNORECASE,
+    )
 )
 # Unresolved deixis: a pronoun/demonstrative referent with nothing to bind it to.
 _DEIXIS_RE = re.compile(

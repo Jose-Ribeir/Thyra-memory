@@ -384,7 +384,10 @@ def _start_transcript_monitor(initial_agent_id: str) -> None:
                 try:
                     from thyra.db.connection import get_conn as _get_conn_m
                     from thyra.models.memory import set_flag as _set_flag_m
-                    _set_flag_m(_get_conn_m(), "last_monitor_ping", str(int(time.time() * 1000)))
+
+                    _set_flag_m(
+                        _get_conn_m(), "last_monitor_ping", str(int(time.time() * 1000))
+                    )
                 except Exception:
                     pass
 
@@ -506,7 +509,9 @@ def _start_transcript_monitor(initial_agent_id: str) -> None:
                 _enqueue_delta(delta, THYRA_DB_PATH)
 
             except Exception as _exc:
-                _mlog.warning("thyra-transcript-monitor: poll error (will retry): %s", _exc)
+                _mlog.warning(
+                    "thyra-transcript-monitor: poll error (will retry): %s", _exc
+                )
                 last_mtime = 0.0
                 last_hash = ""
                 last_transcript = ""

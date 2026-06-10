@@ -134,8 +134,11 @@ def register_recall_tools(mcp) -> None:
             conn = get_conn()
             import time as _t
             from thyra.config import THYRA_AGENT_ID as _GA_DEFAULT
+
             now_ms = int(_t.time() * 1000)
-            last_ping = int(get_flag(conn, "last_monitor_ping", U, _GA_DEFAULT, default="0") or "0")
+            last_ping = int(
+                get_flag(conn, "last_monitor_ping", U, _GA_DEFAULT, default="0") or "0"
+            )
             monitor_ok = last_ping > 0 and (now_ms - last_ping) < 60_000
             return {
                 "system_enabled": get_flag(conn, "system_enabled", U, A) == "true",
