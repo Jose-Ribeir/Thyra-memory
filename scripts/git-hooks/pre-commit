@@ -1,0 +1,11 @@
+#!/bin/sh
+# Pre-commit hook: format staged Python files with ruff and re-stage them.
+# Avoids staging unintended changes by only touching files already staged.
+set -e
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+# Format staged Python files (null-terminated to handle filenames with spaces)
+git diff --cached --name-only --diff-filter=ACM -z | grep -zE '\.py$' | \
+  xargs -0r ruff format --line-length 100
+git diff --cached --name-only --diff-filter=ACM -z | grep -zE '\.py$' | \
+  xargs -0r git add
