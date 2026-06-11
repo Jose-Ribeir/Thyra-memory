@@ -10,6 +10,7 @@ import time
 from collections import deque
 
 from thyra.config import (
+    NIGHTLY_IDLE_CHECK_SECONDS,
     NIGHTLY_INTERVAL_HOURS,
     THYRA_DB_PATH,
     WORKER_POLL_SECONDS,
@@ -37,11 +38,20 @@ class BackgroundWorker:
 
     def run(self) -> None:
         log.info("Thyra consolidation worker started (db=%s)", self._db_path)
+        # On startup, catch up any pairs whose nightly is overdue — covers the
+        # common case where the PC was off and the scheduled window was missed.
+        self._startup_nightly_check()
+        _last_idle_check = time.time()
         while self._running:
             try:
                 self._process_queue()
             except Exception as exc:
                 log.exception("Worker loop error: %s", exc)
+            # Periodic idle scan: run nightly for overdue pairs even when no
+            # turns are happening (queue stays empty indefinitely).
+            if time.time() - _last_idle_check >= NIGHTLY_IDLE_CHECK_SECONDS:
+                self._idle_nightly_check()
+                _last_idle_check = time.time()
             time.sleep(WORKER_POLL_SECONDS)
 
     # ── Queue processing ───────────────────────────────────────────────────────
@@ -168,8 +178,33 @@ class BackgroundWorker:
     # ── Nightly sweep ──────────────────────────────────────────────────────────
 
     def _maybe_nightly(self, user_id: str, agent_id: str) -> None:
+        """Run the nightly sweep for (user_id, agent_id) if enough time has passed.
+
+        Uses the DB-persisted last_nightly timestamp as the authoritative source so
+        the check survives server restarts (in-memory dict resets to 0 on each start,
+        which would re-run the sweep on the very first delta regardless of when it
+        last ran).
+        """
         pair_key = f"{user_id}:{agent_id}"
         last = self._last_nightly.get(pair_key, 0.0)
+
+        # On first encounter for this pair, read the persisted timestamp from the DB.
+        # This prevents re-running the sweep immediately after a server restart when
+        # it was already run recently.
+        if last == 0.0:
+            try:
+                from thyra.db.connection import DBConnection
+                from thyra.models.memory import get_flag
+
+                conn = DBConnection.get(self._db_path)
+                db_last_ms = float(
+                    get_flag(conn, "last_nightly", user_id, agent_id, default="0")
+                )
+                last = db_last_ms / 1000.0  # ms → seconds
+                self._last_nightly[pair_key] = last
+            except Exception:
+                pass  # fall through — 0.0 will trigger the sweep, which is safe
+
         if time.time() - last >= NIGHTLY_INTERVAL_HOURS * 3600:
             self._last_nightly[pair_key] = time.time()
             try:
@@ -178,10 +213,48 @@ class BackgroundWorker:
 
                 conn = DBConnection.get(self._db_path)
                 run_nightly_sweep(conn, user_id, agent_id)
+                log.info("Nightly sweep complete for %s:%s", user_id, agent_id)
             except ImportError:
                 pass
             except Exception as exc:
                 log.warning("Nightly sweep error: %s", exc)
+
+    def _startup_nightly_check(self) -> None:
+        """On worker startup, run nightly for any (user, agent) pair that is overdue.
+
+        The PC may have been off for days — this catches up decay, archiving, and
+        pruning that would otherwise only run after the user's next conversation turn.
+        """
+        try:
+            from thyra.db.connection import DBConnection
+
+            conn = DBConnection.get(self._db_path)
+            rows = conn.execute(
+                "SELECT DISTINCT user_id, agent_id FROM memories WHERE archived=0"
+            ).fetchall()
+            for row in rows:
+                self._maybe_nightly(row["user_id"], row["agent_id"])
+        except Exception as exc:
+            log.warning("Startup nightly check error: %s", exc)
+
+    def _idle_nightly_check(self) -> None:
+        """Periodic idle scan: run nightly for any pair whose interval is overdue.
+
+        Called by the run loop every NIGHTLY_IDLE_CHECK_SECONDS regardless of queue
+        activity — covers the case where the PC stays on but the user never opens
+        Claude Code for days.
+        """
+        try:
+            from thyra.db.connection import DBConnection
+
+            conn = DBConnection.get(self._db_path)
+            rows = conn.execute(
+                "SELECT DISTINCT user_id, agent_id FROM memories WHERE archived=0"
+            ).fetchall()
+            for row in rows:
+                self._maybe_nightly(row["user_id"], row["agent_id"])
+        except Exception as exc:
+            log.warning("Idle nightly check error: %s", exc)
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

@@ -155,6 +155,9 @@ HOT_CACHE_TTL_SECONDS = 3600
 WORKER_POLL_SECONDS = 2
 NIGHTLY_INTERVAL_HOURS = 24
 TURN_LOG_RETENTION_DAYS = 90
+# How often the worker checks for overdue nightly sweeps when the queue is idle.
+# Set low enough that a multi-day absence is caught within one sitting.
+NIGHTLY_IDLE_CHECK_SECONDS = 3600  # 1 hour
 
 # ── Paths (overridable via env) ───────────────────────────────────────────────
 THYRA_DB_PATH: str = os.environ.get(

@@ -279,7 +279,8 @@ def _classify_category(clause: str) -> str:
             return categories[int(sims.argmax())]
         except Exception:
             pass
-    # Rule-based fallback — expanded to cover more categories and reduce context dumps.
+    # Rule-based fallback — all patterns match against clause.lower(), so every
+    # literal must be lowercase (no capital I — use i instead).
     lower = clause.lower()
     if re.search(
         r"\b(?:never|always avoid|don't use|must not|prohibited|required by policy|"
@@ -289,44 +290,44 @@ def _classify_category(clause: str) -> str:
     ):
         return "constraints"
     if re.search(
-        r"\b(?:I (?:am|'m) a\b|I work (?:as|at)\b|I live in\b|my (?:name|role|background|job)\b|"
+        r"\b(?:i (?:am|'m) a\b|i work (?:as|at)\b|i live in\b|my (?:name|role|background|job)\b|"
         r"my (?:title|position) is\b)\b",
         lower,
     ):
         return "identity"
     if re.search(
-        r"\b(?:I (?:prefer|like|love|hate|enjoy|dislike|use|always use|always choose)|"
-        r"my (?:favorite|preferred|go-to)\b|I (?:always|never) (?:use|write|do)\b)\b",
+        r"\b(?:i (?:prefer|like|love|hate|enjoy|dislike|use|always use|always choose)|"
+        r"my (?:favorite|preferred|go-to)\b|i (?:always|never) (?:use|write|do)\b)\b",
         lower,
     ):
         return "preferences"
     if re.search(
-        r"\b(?:I need to\b|I have to\b|I must finish\b|pending task\b|to do\b|"
+        r"\b(?:i need to\b|i have to\b|i must finish\b|pending task\b|to do\b|"
         r"working on\b|currently implementing\b|in progress\b)\b",
         lower,
     ):
         return "tasks"
     if re.search(
-        r"\b(?:my goal\b|I want to achieve\b|I plan to\b|I aim to\b|"
-        r"my objective\b|I hope to\b|I'm working toward\b)\b",
+        r"\b(?:my goal\b|i want to achieve\b|i plan to\b|i aim to\b|"
+        r"my objective\b|i hope to\b|i'm working toward\b)\b",
         lower,
     ):
         return "goals"
     if re.search(
-        r"\b(?:I usually\b|I typically\b|every (?:morning|day|week)\b|my routine\b|"
-        r"I tend to\b|I regularly\b|my habit\b|on a daily basis\b)\b",
+        r"\b(?:i usually\b|i typically\b|every (?:morning|day|week)\b|my routine\b|"
+        r"i tend to\b|i regularly\b|my habit\b|on a daily basis\b)\b",
         lower,
     ):
         return "habits"
     if re.search(
-        r"\b(?:I know (?:that|how)\b|I learned\b|I understand\b|I'm aware\b|"
+        r"\b(?:i know (?:that|how)\b|i learned\b|i understand\b|i'm aware\b|"
         r"it is (?:known|confirmed)\b|we (?:found|confirmed|discovered)\b|"
         r"turns out\b|root cause\b|the (?:fix|solution|cause) is\b)\b",
         lower,
     ):
         return "knowledge"
     if re.search(
-        r"\b(?:email\b|slack\b|message\b|meeting\b|I sent\b|they replied\b|"
+        r"\b(?:email\b|slack\b|message\b|meeting\b|i sent\b|they replied\b|"
         r"responded\b|called\b)\b",
         lower,
     ):
@@ -339,18 +340,18 @@ def _classify_category(clause: str) -> str:
         return "events"
     if re.search(
         r"\b(?:every day\b|daily\b|weekly\b|schedule\b|recurring\b|"
-        r"I wake up\b|morning routine\b)\b",
+        r"i wake up\b|morning routine\b)\b",
         lower,
     ):
         return "routines"
     if re.search(
-        r"\b(?:I (?:know|am skilled|am proficient|am experienced)\b|"
+        r"\b(?:i (?:know|am skilled|am proficient|am experienced)\b|"
         r"years of experience\b|my expertise\b)\b",
         lower,
     ):
         return "skills"
     if re.search(
-        r"\b(?:my (?:manager|colleague|friend|team|boss|partner)\b|I work with\b)\b",
+        r"\b(?:my (?:manager|colleague|friend|team|boss|partner)\b|i work with\b)\b",
         lower,
     ):
         return "relationships"

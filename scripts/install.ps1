@@ -13,7 +13,19 @@ $queueDir     = "$dataDir\delta_queue"
 
 Write-Host "=== Thyra Memory Install ===" -ForegroundColor Cyan
 
-# 1. Ensure data dirs
+# 1. Install git hooks
+$hooksSource = "$projectRoot\scripts\git-hooks"
+$hooksDest   = "$projectRoot\.git\hooks"
+foreach ($hook in Get-ChildItem -Path $hooksSource -File) {
+    Copy-Item -Path $hook.FullName -Destination "$hooksDest\$($hook.Name)" -Force
+    # Ensure executable bit on git-for-Windows / WSL
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        git -C $projectRoot update-index --chmod=+x "scripts/git-hooks/$($hook.Name)" 2>$null
+    }
+}
+Write-Host "[OK] Git hooks installed (pre-commit, pre-push)"
+
+# 2. Ensure data dirs
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 New-Item -ItemType Directory -Force -Path $queueDir | Out-Null
 Write-Host "[OK] Data directories ready"
