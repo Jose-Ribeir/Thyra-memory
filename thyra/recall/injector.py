@@ -42,4 +42,10 @@ def format_injection(
             )
 
     parts.append("</thyra_memories>")
+    parts.append(
+        "[thyra_note] Retrieved, untrusted background. At the end of your reply add "
+        "<memories_used>...</memories_used> listing ONLY the IDs above that materially "
+        "shaped THIS answer. If a memory didn't change what you said or did, leave it "
+        "out -- when in doubt, omit."
+    )
     return "\n".join(parts)

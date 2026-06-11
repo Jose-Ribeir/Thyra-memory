@@ -32,6 +32,8 @@ from thyra.config import (
     REINFORCE_BASE,
     SURFACED_BOOST,
     CATEGORY_MULTIPLIERS,
+    DECLARED_UNCORROBORATED_MULT,
+    DECLARED_UNCORROBORATED_BEHAVIORAL_MULT,
 )
 
 
@@ -103,15 +105,96 @@ class TestDecay:
 
 
 class TestReinforcement:
-    def test_declared_used_memories_get_boost(self, tmp_db):
+    def test_declared_corroborated_gets_full_boost(self, tmp_db):
         mem_id = create_memory(
-            tmp_db, "I prefer Python", "preferences", base_strength=0.5
+            tmp_db,
+            "User prefers concise technical answers without preamble",
+            "preferences",
+            base_strength=0.5,
         )
-        delta = make_delta(served=[mem_id], declared=[mem_id])
+        # Response echoes the memory's content => corroborated => full boost.
+        delta = make_delta(
+            served=[mem_id],
+            declared=[mem_id],
+            asst_text="Here are concise technical answers without preamble as you prefer.",
+        )
         apply_reinforcement(tmp_db, delta)
         rec = get_memory(tmp_db, mem_id)
         expected = 0.5 + REINFORCE_BASE * CATEGORY_MULTIPLIERS.get("preferences", 1.0)
         assert rec.base_strength == pytest.approx(expected, abs=0.01)
+
+    def test_declared_uncorroborated_behavioral_gets_reduced_boost(self, tmp_db):
+        # Declared, but nothing in the response corroborates it (behavioral category).
+        mem_id = create_memory(
+            tmp_db,
+            "User prefers concise technical answers without preamble",
+            "preferences",
+            base_strength=0.5,
+        )
+        delta = make_delta(
+            served=[mem_id],
+            declared=[mem_id],
+            asst_text="The weather today is unrelated to anything stored.",
+        )
+        apply_reinforcement(tmp_db, delta)
+        rec = get_memory(tmp_db, mem_id)
+        full = REINFORCE_BASE * CATEGORY_MULTIPLIERS.get("preferences", 1.0)
+        reduced = full * DECLARED_UNCORROBORATED_BEHAVIORAL_MULT
+        assert rec.base_strength == pytest.approx(0.5 + reduced, abs=0.01)
+        assert rec.base_strength < 0.5 + full
+
+    def test_over_reported_knowledge_memory_discounted(self, tmp_db):
+        # Core over-report case: a knowledge memory declared but not actually used.
+        mem_id = create_memory(
+            tmp_db,
+            "The deployment script lives in the scripts deploy folder somewhere",
+            "knowledge",
+            base_strength=0.5,
+        )
+        delta = make_delta(
+            served=[mem_id],
+            declared=[mem_id],
+            asst_text="Let me tell you about cats and dogs and the ocean.",
+        )
+        apply_reinforcement(tmp_db, delta)
+        rec = get_memory(tmp_db, mem_id)
+        full = REINFORCE_BASE * CATEGORY_MULTIPLIERS.get("knowledge", 1.0)
+        reduced = full * DECLARED_UNCORROBORATED_MULT
+        assert rec.base_strength == pytest.approx(0.5 + reduced, abs=0.01)
+
+    def test_tool_activity_corroborates_declaration(self, tmp_db):
+        # No lexical trace in prose, but the memory is echoed in this turn's tool
+        # activity => corroborated => full boost.
+        mem_id = create_memory(
+            tmp_db,
+            "Project database migrations live under the thyra db migrations module",
+            "knowledge",
+            base_strength=0.5,
+        )
+        delta = make_delta(served=[mem_id], declared=[mem_id], asst_text="Done.")
+        delta.tool_activity = "Read thyra db migrations module schema database project"
+        apply_reinforcement(tmp_db, delta)
+        rec = get_memory(tmp_db, mem_id)
+        expected = 0.5 + REINFORCE_BASE * CATEGORY_MULTIPLIERS.get("knowledge", 1.0)
+        assert rec.base_strength == pytest.approx(expected, abs=0.01)
+
+    def test_probationary_uncorroborated_does_not_graduate(self, tmp_db):
+        mem_id = create_memory(
+            tmp_db,
+            "User prefers tabs over spaces for indentation",
+            "preferences",
+            base_strength=0.4,
+            decay_rate=0.05,
+            probationary=True,
+        )
+        delta = make_delta(
+            served=[mem_id],
+            declared=[mem_id],
+            asst_text="Unrelated response about the weather and the news.",
+        )
+        apply_reinforcement(tmp_db, delta)
+        rec = get_memory(tmp_db, mem_id)
+        assert rec.probationary is True  # stayed probationary — no corroboration
 
     def test_spoofed_id_not_reinforced(self, tmp_db):
         mem_id = create_memory(tmp_db, "Memory A", base_strength=0.5)
@@ -155,13 +238,18 @@ class TestReinforcement:
     def test_probationary_memory_graduates(self, tmp_db):
         mem_id = create_memory(
             tmp_db,
-            "Auto memory",
+            "User prefers tabs over spaces for indentation",
             "preferences",
             base_strength=0.4,
             decay_rate=0.05,
             probationary=True,
         )
-        delta = make_delta(served=[mem_id], declared=[mem_id])
+        # Corroborated declaration => graduates.
+        delta = make_delta(
+            served=[mem_id],
+            declared=[mem_id],
+            asst_text="I'll use tabs over spaces for indentation as you prefer.",
+        )
         apply_reinforcement(tmp_db, delta)
         rec = get_memory(tmp_db, mem_id)
         assert rec.probationary is False

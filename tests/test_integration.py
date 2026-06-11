@@ -158,7 +158,7 @@ class TestFullLifecycle:
         """First real use of a probationary memory should graduate it."""
         mem_id = create_memory(
             tmp_db,
-            "I prefer dark mode",
+            "User strongly prefers dark mode interface settings",
             "preferences",
             base_strength=BASE_STRENGTH_AUTOMATIC,
             decay_rate=DECAY_EPISODIC,
@@ -166,7 +166,11 @@ class TestFullLifecycle:
         )
         assert get_memory(tmp_db, mem_id).probationary is True
 
-        delta = make_delta(served=[mem_id], declared=[mem_id])
+        delta = make_delta(
+            served=[mem_id],
+            declared=[mem_id],
+            asst_text="User strongly prefers dark mode interface settings",
+        )
         apply_delta_sync(tmp_db, delta)
 
         graduated = get_memory(tmp_db, mem_id)

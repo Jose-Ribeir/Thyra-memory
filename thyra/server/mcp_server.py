@@ -311,7 +311,8 @@ def _init_context() -> None:
         # AND a better value already exists in the file (startup from a non-project
         # directory like the user's home folder).
         if project_id in ("global", "unknown"):
-            import json, tempfile
+            import json
+            import tempfile
 
             _ctx_path = os.path.join(
                 os.environ.get("TEMP", tempfile.gettempdir()), "thyra_ctx_latest.json"
@@ -363,6 +364,7 @@ def _start_transcript_monitor(initial_agent_id: str) -> None:
             _detect_correction,
             _enqueue_delta,
             _extract_last_messages,
+            _extract_tool_activity,
             _parse_declared,
         )
         from thyra.server.tools.admin_tools import (
@@ -453,6 +455,7 @@ def _start_transcript_monitor(initial_agent_id: str) -> None:
                 last_mtime = mtime
 
                 assistant_text, user_text = _extract_last_messages(transcript)
+                tool_activity = _extract_tool_activity(transcript)
                 if not assistant_text:
                     continue
 
@@ -504,6 +507,7 @@ def _start_transcript_monitor(initial_agent_id: str) -> None:
                     "cues_fired": cues_fired_state,
                     "raw_user_text": user_text,
                     "raw_assistant_text": assistant_text,
+                    "tool_activity": tool_activity,
                     "correction_flag": _detect_correction(user_text),
                 }
                 _enqueue_delta(delta, THYRA_DB_PATH)

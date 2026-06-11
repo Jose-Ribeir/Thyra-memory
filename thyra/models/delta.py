@@ -3,7 +3,6 @@
 from __future__ import annotations
 import json
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -18,6 +17,7 @@ class DeltaEvent:
     cues_fired: list[str] = field(default_factory=list)
     raw_user_text: str = ""
     raw_assistant_text: str = ""
+    tool_activity: str = ""
     correction_flag: bool = False
 
     @classmethod
@@ -33,6 +33,7 @@ class DeltaEvent:
             cues_fired=data.get("cues_fired", []),
             raw_user_text=data.get("raw_user_text", ""),
             raw_assistant_text=data.get("raw_assistant_text", ""),
+            tool_activity=data.get("tool_activity", ""),
             correction_flag=bool(data.get("correction_flag", False)),
         )
 
@@ -48,6 +49,7 @@ class DeltaEvent:
             "cues_fired": self.cues_fired,
             "raw_user_text": self.raw_user_text,
             "raw_assistant_text": self.raw_assistant_text,
+            "tool_activity": self.tool_activity,
             "correction_flag": self.correction_flag,
         }
 

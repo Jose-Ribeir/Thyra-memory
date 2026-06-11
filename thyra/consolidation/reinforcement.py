@@ -1,4 +1,24 @@
-"""Reinforcement: strengthen memories declared used this turn."""
+"""Reinforcement: strengthen memories actually used this turn.
+
+A <memories_used> declaration is an unreliable self-report -- models over-report,
+naming memories they merely glanced at. So a bare declaration no longer earns the
+full boost. Reinforcement is graded by *corroboration*:
+
+  1. Declared + corroborated -- the memory's content overlaps the response text or
+     this turn's tool activity. Full REINFORCE_BASE boost; probationary memories
+     graduate. Highest confidence it was genuinely used.
+  2. Declared but uncorroborated -- claimed, no evidence. Reduced boost, NEVER
+     graduates. Behavioral memories (preferences/constraints/...) keep a higher floor
+     because they legitimately leave no lexical trace; everything else is discounted
+     harder. This is the anti-over-report path.
+  3. Inferred (not declared) -- served memory whose content overlaps the evidence.
+     Smaller boost (OVERLAP_INFER_MULT). Reinforcement without any tag.
+  4. Surfaced only -- served but neither declared nor overlapping. Tiny SURFACED_BOOST.
+
+Corroboration evidence = the assistant response text PLUS this turn's tool calls and
+results, so a memory that shaped a search query or file path still counts even when
+it never appears in the prose.
+"""
 
 from __future__ import annotations
 
@@ -7,101 +27,120 @@ import sqlite3
 import time
 
 from thyra.config import (
+    BEHAVIORAL_CATEGORIES,
     CATEGORY_MULTIPLIERS,
-    OVERLAP_CONFIRMATORY_CAP,
+    DECLARED_UNCORROBORATED_BEHAVIORAL_MULT,
+    DECLARED_UNCORROBORATED_MULT,
     OVERLAP_INFER_MULT,
     OVERLAP_PRIMARY_THRESHOLD,
     REINFORCE_BASE,
     STRENGTH_CAP,
     SURFACED_BOOST,
-    THYRA_AGENT_ID,
-    THYRA_USER_ID,
 )
 from thyra.models.delta import DeltaEvent
 from thyra.models.memory import get_memory, graduate_memory, update_memory_strength
+
+_WORD_RE = re.compile(r"\b[a-z]{4,}\b")
+
+
+def _words(text: str) -> set[str]:
+    return set(_WORD_RE.findall(text.lower())) if text else set()
 
 
 def apply_reinforcement(
     conn: sqlite3.Connection,
     delta: DeltaEvent,
 ) -> dict[str, str]:
-    """Apply reinforcement from the usage manifest and API-level overlap inference.
-
-    Three signals, in priority order:
-      1. Declaration (LLM <memories_used> tag): full REINFORCE_BASE boost.
-         Anti-spoofed: only declared IDs that were actually served count.
-      2. Overlap inference (API-level, no LLM needed): served memories whose
-         content words appear significantly in the response get REINFORCE_BASE *
-         OVERLAP_INFER_MULT boost. This fires even when the LLM declares nothing,
-         making reinforcement work without any tool call or tag.
-      3. Surfaced-only: served but neither declared nor overlapping → tiny SURFACED_BOOST.
-
-    Declaration (1) and overlap (2) are not mutually exclusive — a memory that is
-    both declared AND overlapping gets (1); overlap is the safety net for (2) only.
-
-    Returns a map {memory_id: action} for logging.
-    """
+    """Apply graded reinforcement. Returns {memory_id: action} for logging."""
     user_id = delta.user_id
     agent_id = delta.agent_id
     now = int(time.time() * 1000)
 
     served_set = set(delta.memories_served)
     declared_set = set(delta.memories_declared)
-
-    # Tenant check — restrict all operations to IDs owned by this (user, agent).
     tenant_ids = _get_tenant_ids(conn, served_set, user_id, agent_id)
+    served_tenant = served_set & tenant_ids
 
-    # Signal 1: declaration anti-spoofed against served set.
-    valid_ids = (declared_set & served_set) & tenant_ids
+    # Fetch each served+owned memory once.
+    served_recs: dict[str, object] = {}
+    for mem_id in served_tenant:
+        rec = get_memory(conn, mem_id, user_id, agent_id)
+        if rec is not None:
+            served_recs[mem_id] = rec
 
-    # Signal 2: API-level overlap inference — works even with no declaration.
-    inferred_ids: set[str] = set()
-    if delta.raw_assistant_text and served_set:
-        inferred_ids = _infer_used_by_overlap(
-            conn,
-            delta.raw_assistant_text,
-            served_set & tenant_ids,
-            user_id,
-            agent_id,
-        )
-        # Declaration already covers these; overlap is the fallback signal only.
-        inferred_ids -= valid_ids
+    # Anti-spoof: a declaration only counts for a memory actually served to us.
+    valid_declared = declared_set & served_tenant
+
+    # Evidence for corroboration: the response text PLUS this turn's tool activity.
+    evidence_parts = [delta.raw_assistant_text or ""]
+    tool_activity = getattr(delta, "tool_activity", "") or ""
+    if tool_activity:
+        evidence_parts.append(tool_activity)
+    evidence_words = _words(" ".join(evidence_parts))
 
     actions: dict[str, str] = {}
 
-    # Apply Signal 1 — full boost + graduation.
-    for mem_id in valid_ids:
-        rec = get_memory(conn, mem_id, user_id, agent_id)
+    # -- Signal 1: declarations, graded by corroboration --
+    for mem_id in valid_declared:
+        rec = served_recs.get(mem_id)
         if rec is None:
             continue
         mult = CATEGORY_MULTIPLIERS.get(rec.category, 1.0)
-        new_strength = min(STRENGTH_CAP, rec.base_strength + REINFORCE_BASE * mult)
-        if rec.probationary:
-            cat_decay = _category_decay(rec.category)
-            graduate_memory(
-                conn, mem_id, new_strength, cat_decay, now, user_id, agent_id
-            )
-            actions[mem_id] = "graduated"
+        if _corroborated(rec, evidence_words):
+            new_strength = min(STRENGTH_CAP, rec.base_strength + REINFORCE_BASE * mult)
+            if rec.probationary:
+                graduate_memory(
+                    conn,
+                    mem_id,
+                    new_strength,
+                    _category_decay(rec.category),
+                    now,
+                    user_id,
+                    agent_id,
+                )
+                actions[mem_id] = "graduated"
+            else:
+                update_memory_strength(
+                    conn, mem_id, new_strength, now, user_id, agent_id
+                )
+                conn.execute(
+                    "UPDATE memories SET use_count = use_count + 1 WHERE id=? AND user_id=? AND agent_id=?",
+                    (mem_id, user_id, agent_id),
+                )
+                actions[mem_id] = "reinforced"
         else:
+            # Claimed but unverified -- reduced boost, NEVER graduate.
+            if rec.category in BEHAVIORAL_CATEGORIES:
+                claim_mult = DECLARED_UNCORROBORATED_BEHAVIORAL_MULT
+                tag = "claimed-behavioral"
+            else:
+                claim_mult = DECLARED_UNCORROBORATED_MULT
+                tag = "claimed"
+            boost = REINFORCE_BASE * mult * claim_mult
+            new_strength = min(STRENGTH_CAP, rec.base_strength + boost)
             update_memory_strength(conn, mem_id, new_strength, now, user_id, agent_id)
-            conn.execute(
-                "UPDATE memories SET use_count = use_count + 1 WHERE id=? AND user_id=? AND agent_id=?",
-                (mem_id, user_id, agent_id),
-            )
-            actions[mem_id] = "reinforced"
+            actions[mem_id] = tag
 
-    # Apply Signal 2 — overlap-inferred boost (smaller than full declaration).
-    for mem_id in inferred_ids:
-        rec = get_memory(conn, mem_id, user_id, agent_id)
-        if rec is None:
+    # -- Signal 2: overlap inference for NON-declared served memories --
+    inferred_ids: set[str] = set()
+    for mem_id, rec in served_recs.items():
+        if mem_id in valid_declared:
             continue
+        if not _corroborated(rec, evidence_words):
+            continue
+        inferred_ids.add(mem_id)
         mult = CATEGORY_MULTIPLIERS.get(rec.category, 1.0)
         boost = REINFORCE_BASE * OVERLAP_INFER_MULT * mult
         new_strength = min(STRENGTH_CAP, rec.base_strength + boost)
         if rec.probationary:
-            cat_decay = _category_decay(rec.category)
             graduate_memory(
-                conn, mem_id, new_strength, cat_decay, now, user_id, agent_id
+                conn,
+                mem_id,
+                new_strength,
+                _category_decay(rec.category),
+                now,
+                user_id,
+                agent_id,
             )
             actions[mem_id] = "graduated-overlap"
         else:
@@ -112,19 +151,13 @@ def apply_reinforcement(
             )
             actions[mem_id] = "reinforced-overlap"
 
-    # Apply Signal 3 — surfaced only (neither declared nor overlapping).
-    surfaced_only = (served_set & tenant_ids) - valid_ids - inferred_ids
-    for mem_id in surfaced_only:
-        rec = get_memory(conn, mem_id, user_id, agent_id)
-        if rec is None:
+    # -- Signal 3: surfaced only (served, neither declared nor overlapping) --
+    for mem_id, rec in served_recs.items():
+        if mem_id in valid_declared or mem_id in inferred_ids:
             continue
         new_strength = min(STRENGTH_CAP, rec.base_strength + SURFACED_BOOST)
         update_memory_strength(conn, mem_id, new_strength, now, user_id, agent_id)
         actions[mem_id] = "surfaced"
-
-    # Confirmatory overlap on top of declared memories (additive cap, as before).
-    if delta.raw_assistant_text and valid_ids:
-        _apply_overlap_confirmation(conn, delta, valid_ids, now, user_id, agent_id)
 
     return actions
 
@@ -155,57 +188,18 @@ def _category_decay(category: str) -> float:
     return DECAY_EXPLICIT
 
 
-def _infer_used_by_overlap(
-    conn: sqlite3.Connection,
-    response_text: str,
-    candidate_ids: set[str],
-    user_id: str,
-    agent_id: str,
-) -> set[str]:
-    """Return the subset of candidate_ids whose content is significantly present
-    in response_text (API-level signal: we know what went in and what came out).
+def _corroborated(rec, evidence_words: set[str]) -> bool:
+    """True if the memory's content is significantly present in the evidence
+    (response text + tool activity).
 
-    Uses OVERLAP_PRIMARY_THRESHOLD (fraction of memory's content words found in
-    the response) as the gate.  Short memories (< 4 content words) are skipped
-    because their overlap fraction is noisy at small denominators.
+    Short memories (< 4 content words) cannot be judged reliably at small
+    denominators, so they are treated as NOT corroborated (conservative -- they
+    fall to the reduced 'claimed' boost rather than earning the full boost).
     """
-    if not response_text or not candidate_ids:
-        return set()
-    response_words = set(re.findall(r"\b[a-z]{4,}\b", response_text.lower()))
-    if not response_words:
-        return set()
-    used: set[str] = set()
-    for mem_id in candidate_ids:
-        rec = get_memory(conn, mem_id, user_id, agent_id)
-        if rec is None or rec.locked:
-            continue
-        mem_words = set(re.findall(r"\b[a-z]{4,}\b", rec.content.lower()))
-        if len(mem_words) < 4:
-            continue
-        overlap = len(response_words & mem_words) / len(mem_words)
-        if overlap >= OVERLAP_PRIMARY_THRESHOLD:
-            used.add(mem_id)
-    return used
-
-
-def _apply_overlap_confirmation(
-    conn: sqlite3.Connection,
-    delta: DeltaEvent,
-    valid_ids: set[str],
-    now: int,
-    user_id: str,
-    agent_id: str,
-) -> None:
-    response_words = set(re.findall(r"\b[a-z]{4,}\b", delta.raw_assistant_text.lower()))
-    for mem_id in valid_ids:
-        rec = get_memory(conn, mem_id, user_id, agent_id)
-        if rec is None or rec.locked:
-            continue
-        mem_words = set(re.findall(r"\b[a-z]{4,}\b", rec.content.lower()))
-        if not mem_words:
-            continue
-        overlap = len(response_words & mem_words) / len(mem_words)
-        if overlap > 0.3:
-            boost = min(OVERLAP_CONFIRMATORY_CAP, overlap * 0.1)
-            new_strength = min(STRENGTH_CAP, rec.base_strength + boost)
-            update_memory_strength(conn, mem_id, new_strength, now, user_id, agent_id)
+    if rec is None or rec.locked or not evidence_words:
+        return False
+    mem_words = _words(rec.content)
+    if len(mem_words) < 4:
+        return False
+    overlap = len(evidence_words & mem_words) / len(mem_words)
+    return overlap >= OVERLAP_PRIMARY_THRESHOLD

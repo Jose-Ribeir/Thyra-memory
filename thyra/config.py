@@ -62,6 +62,20 @@ OVERLAP_CONFIRMATORY_CAP = 0.10
 OVERLAP_PRIMARY_THRESHOLD = 0.35  # min fraction of memory words present in response
 OVERLAP_INFER_MULT = 0.60  # inferred boost = REINFORCE_BASE × this
 
+
+# ── Graded declaration trust (anti over-report) ───────────────────────────────
+# A bare <memories_used> declaration is an unreliable self-report. We pay the full
+# REINFORCE_BASE boost (and allow probationary graduation) only when the declaration
+# is *corroborated* — the memory's content overlaps the response text or this turn's
+# tool activity. Uncorroborated declarations get a reduced boost and never graduate.
+DECLARED_UNCORROBORATED_MULT = 0.33  # bare declaration, non-behavioral category
+DECLARED_UNCORROBORATED_BEHAVIORAL_MULT = 0.5  # bare declaration, behavioral category
+# Behavioral memories legitimately leave no lexical trace in a response (e.g. a tone
+# or format preference), so overlap is a weak corroborator for them — they keep a
+# higher floor on bare declaration but still do NOT auto-graduate without evidence.
+BEHAVIORAL_CATEGORIES = frozenset(
+    {"preferences", "constraints", "identity", "communication", "habits"}
+)
 CATEGORY_MULTIPLIERS: dict[str, float] = {
     "constraints": 0.3,
     "identity": 0.5,

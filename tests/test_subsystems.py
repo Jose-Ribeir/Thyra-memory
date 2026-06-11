@@ -1394,7 +1394,11 @@ class TestEndToEndRoundTrip:
             decay_rate=0.15,
             probationary=True,
         )
-        d = delta(served=[mem_id], declared=[mem_id])
+        d = delta(
+            served=[mem_id],
+            declared=[mem_id],
+            asst_text="I prefer dark mode in all editors",
+        )
         apply_reinforcement(tmp_db, d)
 
         rec_after_grad = get_memory(tmp_db, mem_id)

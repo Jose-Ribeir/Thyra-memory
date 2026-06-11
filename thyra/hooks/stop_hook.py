@@ -99,6 +99,7 @@ def main() -> None:
                 pass
 
         assistant_text, user_text = _extract_last_messages(transcript_path)
+        tool_activity = _extract_tool_activity(transcript_path)
         declared_ids = _parse_declared(assistant_text)
         served_ids, turn_id, cues_fired = _load_turn_state(session_id)
 
@@ -113,6 +114,7 @@ def main() -> None:
             "cues_fired": cues_fired,
             "raw_user_text": user_text,
             "raw_assistant_text": assistant_text,
+            "tool_activity": tool_activity,
             "correction_flag": _detect_correction(user_text),
         }
         _enqueue_delta(delta, db_path)
@@ -276,6 +278,65 @@ def _is_tool_result_text(text: str) -> bool:
         if text.startswith(marker):
             return True
     return False
+
+
+def _extract_tool_activity(transcript_path: str, max_chars: int = 4000) -> str:
+    """Concatenate this turn's tool-use names/inputs and tool-result text.
+
+    Used as corroboration evidence for reinforcement: a declared memory that
+    shaped a tool call (search query, file path, command) leaves a trace here
+    even when it never appears in the assistant's prose.
+    """
+    if not transcript_path or not os.path.exists(transcript_path):
+        return ""
+    try:
+        with open(transcript_path, encoding="utf-8") as f:
+            raw = f.read().strip()
+        if not raw:
+            return ""
+        lines_list = raw.splitlines() if chr(10) in raw else [raw]
+        parts: list[str] = []
+        # Only the recent window -- the current turn's activity lives at the tail.
+        for line in lines_list[-40:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            msg = record.get("message")
+            content_val = (
+                msg.get("content") if isinstance(msg, dict) else record.get("content")
+            )
+            if not isinstance(content_val, list):
+                continue
+            for block in content_val:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "tool_use":
+                    parts.append(str(block.get("name", "")))
+                    inp = block.get("input")
+                    if isinstance(inp, dict):
+                        parts.append(" ".join(str(v) for v in inp.values())[:1000])
+                    elif inp:
+                        parts.append(str(inp)[:1000])
+                elif btype == "tool_result":
+                    inner = block.get("content", "")
+                    if isinstance(inner, list):
+                        parts.extend(
+                            str(c.get("text", ""))[:1000]
+                            for c in inner
+                            if isinstance(c, dict) and c.get("type") == "text"
+                        )
+                    elif inner:
+                        parts.append(str(inner)[:1000])
+        return " ".join(p for p in parts if p)[:max_chars]
+    except Exception:
+        return ""
 
 
 def _parse_declared(assistant_text: str) -> list[str]:
