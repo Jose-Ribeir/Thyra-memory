@@ -38,6 +38,8 @@ from thyra.config import (
     OVERLAP_INFER_MULT,
     OVERLAP_PRIMARY_THRESHOLD,
     PROBATIONARY_AUTOPURGE_DAYS,
+    RECENCY_BOOST_MAX,
+    RECENCY_HALF_LIFE_DAYS,
     REINFORCE_BASE,
     RESURRECTION_STRENGTH,
     RESURRECTION_THRESHOLD,
@@ -79,7 +81,7 @@ from thyra.models.memory import (
     upsert_assoc_edge,
     upsert_cue_edge,
 )
-from thyra.recall.scorer import score_memories
+from thyra.recall.scorer import _recency_mult, score_memories
 from thyra.recall.selector import greedy_select
 
 
@@ -114,6 +116,13 @@ def backdate(db, mem_id, days):
     """Set last_access to `days` ago (ms)."""
     past_ms = int(time.time() * 1000) - int(days * 86_400_000)
     db.execute("UPDATE memories SET last_access=? WHERE id=?", (past_ms, mem_id))
+    db.commit()
+
+
+def _backdate_created_at(db, mem_id, days):
+    """Set created_at to `days` ago (ms) — simulates an older memory."""
+    past_ms = int(time.time() * 1000) - int(days * 86_400_000)
+    db.execute("UPDATE memories SET created_at=? WHERE id=?", (past_ms, mem_id))
     db.commit()
 
 
@@ -867,7 +876,8 @@ class TestScorerArithmetic:
         expected_spread = 0.5 * 1.0 * SPREADING_DIRECT
         # No category_weights → all cat_weights = 0 → prod(1-0) = 1 → presence = PRESENCE_FLOOR
         expected_presence = PRESENCE_FLOOR
-        expected_score = (base + expected_spread) * expected_presence
+        expected_recency = _recency_mult(rec.created_at, now_ms)
+        expected_score = (base + expected_spread) * expected_presence * expected_recency
         assert target_score == pytest.approx(expected_score, rel=0.02)
 
     def test_one_hop_assoc_spread(self, tmp_db):
@@ -964,7 +974,141 @@ class TestScorerArithmetic:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 6.  GREEDY SELECTOR
+# 6.  RECENCY-WEIGHTED CUE ACTIVATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRecencyWeightedCueActivation:
+    """Full-score recency multiplier: newer memories score higher on shared cues."""
+
+    def _score(self, memories, cues, cue_map, idf):
+        now = int(time.time() * 1000)
+        return score_memories(memories, cues, cue_map, {}, [], idf, {}, now)
+
+    def test_new_beats_moderate_old(self, tmp_db, monkeypatch):
+        """With default RECENCY_BOOST_MAX, a new memory beats a moderately old one
+        even with lower edge weight — the validated scenario from the plan."""
+        import thyra.recall.scorer as scorer_mod
+
+        monkeypatch.setattr(scorer_mod, "RECENCY_BOOST_MAX", 0.80)
+        monkeypatch.setattr(scorer_mod, "RECENCY_HALF_LIFE_DAYS", 14.0)
+
+        old_id = create_memory(
+            tmp_db, "thyra memory old", base_strength=0.8, seed_cues=False
+        )
+        new_id = create_memory(
+            tmp_db, "thyra memory new", base_strength=0.4, seed_cues=False
+        )
+
+        _insert_cue_edge_raw(
+            tmp_db, "thyra", old_id, weight=0.60, fire_count=8, use_count=6
+        )
+        _insert_cue_edge_raw(
+            tmp_db, "thyra", new_id, weight=0.40, fire_count=1, use_count=1
+        )
+
+        _backdate_created_at(tmp_db, old_id, days=365)
+        backdate(tmp_db, old_id, days=5)  # last_access 5 days ago
+
+        memories = list_active_memories(tmp_db, U, A)
+        cue_map = load_cue_edge_map(tmp_db, U, A)
+        scored = self._score(memories, ["thyra"], cue_map, {"thyra": 1.0})
+        scores = {r.id: s for r, s in scored}
+
+        assert scores[new_id] > scores[old_id], (
+            f"new={scores[new_id]:.4f} should beat old={scores[old_id]:.4f}"
+        )
+
+    def test_disabled_restores_old_ordering(self, tmp_db, monkeypatch):
+        """RECENCY_BOOST_MAX=0.0 → old high-base memory wins; no change to pre-feature behaviour."""
+        import thyra.recall.scorer as scorer_mod
+
+        monkeypatch.setattr(scorer_mod, "RECENCY_BOOST_MAX", 0.0)
+
+        old_id = create_memory(
+            tmp_db, "thyra old high base", base_strength=0.8, seed_cues=False
+        )
+        new_id = create_memory(
+            tmp_db, "thyra new low base", base_strength=0.4, seed_cues=False
+        )
+
+        _insert_cue_edge_raw(
+            tmp_db, "thyra", old_id, weight=0.60, fire_count=8, use_count=6
+        )
+        _insert_cue_edge_raw(
+            tmp_db, "thyra", new_id, weight=0.40, fire_count=1, use_count=1
+        )
+
+        _backdate_created_at(tmp_db, old_id, days=365)
+        backdate(tmp_db, old_id, days=5)
+
+        memories = list_active_memories(tmp_db, U, A)
+        cue_map = load_cue_edge_map(tmp_db, U, A)
+        scored = self._score(memories, ["thyra"], cue_map, {"thyra": 1.0})
+        scores = {r.id: s for r, s in scored}
+
+        # Feature off → old higher-base memory wins
+        assert scores[old_id] > scores[new_id]
+
+    def test_zero_created_at_gives_mult_one(self):
+        """`_recency_mult(0, now_ms)` returns exactly 1.0 (legacy row guard)."""
+        now_ms = int(time.time() * 1000)
+        assert _recency_mult(0, now_ms) == pytest.approx(1.0)
+
+    def test_mult_formula_math(self, monkeypatch):
+        """Unit-test the exponential decay formula at key age milestones."""
+        import thyra.recall.scorer as scorer_mod
+
+        boost = 1.0
+        half_life = 14.0
+        monkeypatch.setattr(scorer_mod, "RECENCY_BOOST_MAX", boost)
+        monkeypatch.setattr(scorer_mod, "RECENCY_HALF_LIFE_DAYS", half_life)
+
+        now_ms = int(time.time() * 1000)
+
+        # age = 0: mult = 1 + BOOST * exp(0) = 1 + 1.0 = 2.0
+        assert _recency_mult(now_ms, now_ms) == pytest.approx(2.0)
+
+        # age = HALF_LIFE days: mult = 1 + BOOST * e^-1
+        half_life_ms = now_ms - int(half_life * 86_400_000)
+        assert _recency_mult(half_life_ms, now_ms) == pytest.approx(
+            1.0 + boost * math.exp(-1.0), rel=1e-6
+        )
+
+        # age = 365 days: boost is negligible (< 0.01)
+        old_ms = now_ms - int(365 * 86_400_000)
+        assert _recency_mult(old_ms, now_ms) == pytest.approx(1.0, abs=0.01)
+
+    def test_uncued_memory_recency_applied_to_base_level(self, tmp_db, monkeypatch):
+        """Memory with no cue activation still gets recency on base_level (full-score design)."""
+        import thyra.recall.scorer as scorer_mod
+
+        boost = 1.0
+        monkeypatch.setattr(scorer_mod, "RECENCY_BOOST_MAX", boost)
+        monkeypatch.setattr(scorer_mod, "RECENCY_HALF_LIFE_DAYS", 14.0)
+
+        mem_id = create_memory(
+            tmp_db, "no cue edges at all", base_strength=1.0, seed_cues=False
+        )
+        # No cue edges → not in cue_map
+
+        memories = list_active_memories(tmp_db, U, A)
+        now_ms = int(time.time() * 1000)
+        scored = score_memories(memories, ["unrelated"], {}, {}, [], {}, {}, now_ms)
+        actual = next(s for r, s in scored if r.id == mem_id)
+
+        rec = next(r for r, _ in scored if r.id == mem_id)
+        from thyra.config import PRESENCE_FLOOR
+
+        base = compute_base_level(
+            rec.base_strength, rec.decay_rate, rec.last_access, now_ms
+        )
+        expected = base * PRESENCE_FLOOR * _recency_mult(rec.created_at, now_ms)
+        assert actual == pytest.approx(expected, rel=0.02)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 7.  GREEDY SELECTOR
 # ═══════════════════════════════════════════════════════════════════════════════
 
 

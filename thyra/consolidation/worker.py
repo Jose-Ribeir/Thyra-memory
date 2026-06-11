@@ -13,6 +13,7 @@ from thyra.config import (
     CLEANUP_INTERVAL_HOURS,
     NIGHTLY_IDLE_CHECK_SECONDS,
     NIGHTLY_INTERVAL_HOURS,
+    SWEEP_FORMATION_THRESHOLD,
     THYRA_DB_PATH,
     WORKER_POLL_SECONDS,
 )
@@ -240,7 +241,21 @@ class BackgroundWorker:
             except Exception:
                 pass  # fall through — 0.0 will trigger the sweep, which is safe
 
-        if time.time() - last >= NIGHTLY_INTERVAL_HOURS * 3600:
+        time_due = time.time() - last >= NIGHTLY_INTERVAL_HOURS * 3600
+        usage_due = False
+        if not time_due:
+            try:
+                from thyra.db.connection import DBConnection
+
+                conn = DBConnection.get(self._db_path)
+                usage_due = (
+                    _formations_since(conn, user_id, agent_id, int(last * 1000))
+                    >= SWEEP_FORMATION_THRESHOLD
+                )
+            except Exception:
+                pass
+
+        if time_due or usage_due:
             self._last_nightly[pair_key] = time.time()
             try:
                 from thyra.consolidation.nightly import run_nightly_sweep
@@ -248,7 +263,12 @@ class BackgroundWorker:
 
                 conn = DBConnection.get(self._db_path)
                 run_nightly_sweep(conn, user_id, agent_id)
-                log.info("Nightly sweep complete for %s:%s", user_id, agent_id)
+                log.info(
+                    "Nightly sweep complete for %s:%s (reason=%s)",
+                    user_id,
+                    agent_id,
+                    "usage" if usage_due else "time",
+                )
             except ImportError:
                 pass
             except Exception as exc:
@@ -309,6 +329,16 @@ class BackgroundWorker:
             fpath.rename(dest)
         except Exception:
             pass
+
+
+def _formations_since(conn, user_id: str, agent_id: str, since_ms: int) -> int:
+    """Count active memories created after since_ms (epoch milliseconds)."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE user_id=? AND agent_id=? "
+        "AND archived=0 AND created_at > ?",
+        (user_id, agent_id, since_ms),
+    ).fetchone()
+    return row[0] if row else 0
 
 
 def _log_turn(conn, delta: DeltaEvent) -> None:

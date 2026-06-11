@@ -34,6 +34,7 @@ def run_nightly_sweep(
     summary: dict[str, int] = {}
 
     summary["decayed"] = _full_decay_pass(conn, user_id, agent_id, now_ms)
+    summary["batch_deduped"] = _batch_dedup_pass(conn, user_id, agent_id, now_ms)
     summary["probationary_purged"] = _autopurge_unused_probationary(
         conn, user_id, agent_id, now_ms
     )
@@ -89,6 +90,112 @@ def _full_decay_pass(
                 )
                 count += 1
     return count
+
+
+def _batch_dedup_pass(
+    conn: sqlite3.Connection,
+    user_id: str,
+    agent_id: str,
+    now_ms: int,
+) -> int:
+    """Merge near-duplicate active memories formed across different sessions.
+
+    Per-turn dedup only checks incoming content against existing memories at
+    formation time.  This pass scans all active memories pairwise so duplicates
+    that slipped through (different sessions, slightly different wording) get
+    collapsed.  Survivor = stronger memory; absorbs REINFORCE_BASE strength boost
+    and +1 use_count.  The weaker copy is archived.
+    """
+    import re
+
+    from thyra.config import DEDUP_SIMILARITY_THRESHOLD, REINFORCE_BASE, STRENGTH_CAP
+
+    rows = conn.execute(
+        "SELECT id, content, base_strength FROM memories "
+        "WHERE user_id=? AND agent_id=? AND archived=0 "
+        "ORDER BY created_at DESC",  # newer memory is survivor; absorbs older duplicate's strength
+        (user_id, agent_id),
+    ).fetchall()
+
+    if len(rows) < 2:
+        return 0
+
+    records = [dict(r) for r in rows]
+    _word_re = re.compile(r"\b[a-z]{4,}\b")
+
+    def _words(text: str) -> set[str]:
+        return set(_word_re.findall(text.lower())) if text else set()
+
+    # Try ML embeddings for accurate similarity; fall back to word-overlap.
+    sim_matrix = None
+    try:
+        from thyra.formation.refiner import _get_model_and_embeddings
+        from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
+
+        model, _, _ = _get_model_and_embeddings()
+        if model is None:
+            raise ImportError
+        embeddings = model.encode(
+            [r["content"] for r in records], show_progress_bar=False
+        )
+        sim_matrix = _cos_sim(embeddings, embeddings)
+    except Exception:
+        pass
+
+    word_sets = [_words(r["content"]) for r in records] if sim_matrix is None else []
+
+    merged: set[str] = set()
+    survivor_updates: dict[str, float] = {}
+    archive_ids: set[str] = set()
+
+    for i, survivor in enumerate(records):
+        if survivor["id"] in merged:
+            continue
+        cur_strength = survivor_updates.get(survivor["id"], survivor["base_strength"])
+
+        for j in range(i + 1, len(records)):
+            weaker = records[j]
+            if weaker["id"] in merged:
+                continue
+
+            if sim_matrix is not None:
+                is_dup = float(sim_matrix[i][j]) >= DEDUP_SIMILARITY_THRESHOLD
+            else:
+                ws, ww = word_sets[i], word_sets[j]
+                union = ws | ww
+                is_dup = (
+                    bool(union)
+                    and len(ws & ww) / len(union) >= DEDUP_SIMILARITY_THRESHOLD * 0.7
+                )
+
+            if not is_dup:
+                continue
+
+            cur_strength = min(STRENGTH_CAP, cur_strength + REINFORCE_BASE)
+            survivor_updates[survivor["id"]] = cur_strength
+            archive_ids.add(weaker["id"])
+            merged.add(weaker["id"])
+            log.debug(
+                "batch-dedup: archive %s → merge into %s", weaker["id"], survivor["id"]
+            )
+
+    if not archive_ids:
+        return 0
+
+    with conn:
+        for mem_id, new_str in survivor_updates.items():
+            conn.execute(
+                "UPDATE memories SET base_strength=?, use_count=use_count+1, last_access=? "
+                "WHERE id=? AND user_id=? AND agent_id=?",
+                (new_str, now_ms, mem_id, user_id, agent_id),
+            )
+        placeholders = ",".join("?" * len(archive_ids))
+        conn.execute(
+            f"UPDATE memories SET archived=1, archived_at=? WHERE id IN ({placeholders})",
+            (now_ms, *archive_ids),
+        )
+
+    return len(archive_ids)
 
 
 def _autopurge_unused_probationary(

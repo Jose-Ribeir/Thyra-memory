@@ -8,11 +8,26 @@ from typing import Sequence
 from thyra.config import (
     DISCRIMINABILITY_FLOOR,
     PRESENCE_FLOOR,
+    RECENCY_BOOST_MAX,
+    RECENCY_HALF_LIFE_DAYS,
     SPREADING_ASSOC,
     SPREADING_DIRECT,
     SPREADING_SITUATION,
 )
 from thyra.models.memory import MemoryRecord, SituationEdge, compute_base_level
+
+
+def _recency_mult(created_at_ms: int, now_ms: int) -> float:
+    """Full-score recency boost: >= 1.0, decays toward 1.0 as memory ages.
+
+    Separates 'youth of fact' (created_at) from 'staleness of use' (last_access).
+    created_at_ms == 0 means a legacy row with no timestamp; returns 1.0.
+    RECENCY_BOOST_MAX == 0.0 short-circuits with zero math cost.
+    """
+    if RECENCY_BOOST_MAX == 0.0 or created_at_ms <= 0:
+        return 1.0
+    age_days = max(0.0, (now_ms - created_at_ms) / 86_400_000)
+    return 1.0 + RECENCY_BOOST_MAX * math.exp(-age_days / RECENCY_HALF_LIFE_DAYS)
 
 
 def score_memories(
@@ -71,7 +86,8 @@ def score_memories(
             1.0 - math.prod(1.0 - w for w in cat_weights)
         )
 
-        score = (base_level + spreading) * presence
+        recency_mult = _recency_mult(rec.created_at, now_ms)
+        score = (base_level + spreading) * presence * recency_mult
         scored.append((rec, score))
 
     scored.sort(key=lambda x: x[1], reverse=True)

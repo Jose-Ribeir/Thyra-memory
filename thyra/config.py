@@ -28,6 +28,15 @@ DISCRIMINABILITY_FLOOR = 0.15
 PRESENCE_FLOOR = 0.20
 SCORE_FLOOR = 0.05  # minimum score to include in injection
 
+# ── Recency-weighted cue activation ───────────────────────────────────────────
+# Peak boost applied to the full score for a brand-new memory (age=0).
+# 0.80 → new memory scores up to 1.8× an old one on the same cues.
+# Set to 0.0 to disable entirely (backward-compatible).
+RECENCY_BOOST_MAX: float = 0.80
+
+# Timescale for boost decay (days). At this age the boost is at ~37% of peak.
+RECENCY_HALF_LIFE_DAYS: float = 14.0
+
 # ── Cue extraction ────────────────────────────────────────────────────────────
 MAX_CUES_PER_TURN = 12
 MIN_CUE_LENGTH = 3
@@ -96,7 +105,7 @@ CATEGORY_MULTIPLIERS: dict[str, float] = {
 
 # ── Cue graph dynamics ────────────────────────────────────────────────────────
 CONTENT_SEED_CUES = 8
-CONTENT_SEED_WEIGHT = 0.30
+CONTENT_SEED_WEIGHT = 0.40
 SYNONYM_CUE_WEIGHT = 0.10
 SYNONYM_SIMILARITY_THRESHOLD = 0.82
 SYNONYM_MAX_EXPANSIONS = 6
@@ -168,6 +177,10 @@ HOT_CACHE_TTL_SECONDS = 3600
 # ── Background worker ─────────────────────────────────────────────────────────
 WORKER_POLL_SECONDS = 2
 NIGHTLY_INTERVAL_HOURS = 24
+# Trigger the nightly sweep early when this many memories have been formed since
+# the last sweep — keeps strength levels fresh during heavy-use sessions without
+# waiting for the full 24h clock.
+SWEEP_FORMATION_THRESHOLD = 25
 TURN_LOG_RETENTION_DAYS = 90
 # How often the worker checks for overdue nightly sweeps when the queue is idle.
 # Set low enough that a multi-day absence is caught within one sitting.
