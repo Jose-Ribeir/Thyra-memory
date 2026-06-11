@@ -10,6 +10,7 @@ import time
 from collections import deque
 
 from thyra.config import (
+    CLEANUP_INTERVAL_HOURS,
     NIGHTLY_IDLE_CHECK_SECONDS,
     NIGHTLY_INTERVAL_HOURS,
     THYRA_DB_PATH,
@@ -27,6 +28,7 @@ class BackgroundWorker:
         self._queue_dir.mkdir(parents=True, exist_ok=True)
         self._running = True
         self._last_nightly: dict[str, float] = {}
+        self._last_cleanup: dict[str, float] = {}
         # Per-pair turn window (deque maxlen=3) for Hebbian association
         self._turn_windows: dict[str, deque] = {}
         # Per-pair locks to serialize consolidation
@@ -82,6 +84,7 @@ class BackgroundWorker:
         lock = self._get_pair_lock(pair_key)
         with lock:
             self._apply_delta(delta)
+            self._maybe_cleanup(delta.user_id, delta.agent_id)
             self._maybe_nightly(delta.user_id, delta.agent_id)
         fpath.unlink(missing_ok=True)
 
@@ -175,7 +178,39 @@ class BackgroundWorker:
         # Invalidate hot cache
         HOT_CACHE.invalidate(f"snapshot:{delta.user_id}:{delta.agent_id}")
 
-    # ── Nightly sweep ──────────────────────────────────────────────────────────
+    # ── Cleanup & nightly ──────────────────────────────────────────────────────
+
+    def _maybe_cleanup(self, user_id: str, agent_id: str) -> None:
+        """Run the junk-cleanup pass for (user_id, agent_id) if enough time has passed.
+
+        Rate-limited to once per CLEANUP_INTERVAL_HOURS per pair (in-memory only —
+        a restart resets the timer, which is fine since the user said a couple of
+        runs per day is acceptable on a local machine).
+        """
+        pair_key = f"{user_id}:{agent_id}"
+        if (
+            time.time() - self._last_cleanup.get(pair_key, 0.0)
+            < CLEANUP_INTERVAL_HOURS * 3600
+        ):
+            return
+        self._last_cleanup[pair_key] = time.time()
+        try:
+            from thyra.consolidation.cleanup import run_junk_cleanup
+            from thyra.db.connection import DBConnection
+
+            conn = DBConnection.get(self._db_path)
+            deleted = run_junk_cleanup(conn, user_id, agent_id)
+            if deleted:
+                log.info(
+                    "Post-usage cleanup: %d deleted for %s:%s",
+                    deleted,
+                    user_id,
+                    agent_id,
+                )
+        except ImportError:
+            pass
+        except Exception as exc:
+            log.warning("Cleanup error: %s", exc)
 
     def _maybe_nightly(self, user_id: str, agent_id: str) -> None:
         """Run the nightly sweep for (user_id, agent_id) if enough time has passed.
@@ -233,12 +268,13 @@ class BackgroundWorker:
                 "SELECT DISTINCT user_id, agent_id FROM memories WHERE archived=0"
             ).fetchall()
             for row in rows:
+                self._maybe_cleanup(row["user_id"], row["agent_id"])
                 self._maybe_nightly(row["user_id"], row["agent_id"])
         except Exception as exc:
             log.warning("Startup nightly check error: %s", exc)
 
     def _idle_nightly_check(self) -> None:
-        """Periodic idle scan: run nightly for any pair whose interval is overdue.
+        """Periodic idle scan: run cleanup and nightly for any overdue pair.
 
         Called by the run loop every NIGHTLY_IDLE_CHECK_SECONDS regardless of queue
         activity — covers the case where the PC stays on but the user never opens
@@ -252,6 +288,7 @@ class BackgroundWorker:
                 "SELECT DISTINCT user_id, agent_id FROM memories WHERE archived=0"
             ).fetchall()
             for row in rows:
+                self._maybe_cleanup(row["user_id"], row["agent_id"])
                 self._maybe_nightly(row["user_id"], row["agent_id"])
         except Exception as exc:
             log.warning("Idle nightly check error: %s", exc)

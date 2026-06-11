@@ -158,6 +158,9 @@ TURN_LOG_RETENTION_DAYS = 90
 # How often the worker checks for overdue nightly sweeps when the queue is idle.
 # Set low enough that a multi-day absence is caught within one sitting.
 NIGHTLY_IDLE_CHECK_SECONDS = 3600  # 1 hour
+# How often the junk-cleanup pass runs per user/agent pair (post-usage trigger).
+# Lighter than nightly — safe to fire multiple times per day on a local machine.
+CLEANUP_INTERVAL_HOURS = 4
 
 # ── Paths (overridable via env) ───────────────────────────────────────────────
 THYRA_DB_PATH: str = os.environ.get(
