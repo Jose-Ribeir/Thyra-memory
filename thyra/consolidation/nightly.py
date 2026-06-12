@@ -11,6 +11,9 @@ from thyra.config import (
     ASSOC_PRUNE_THRESHOLD,
     ARCHIVE_THRESHOLD,
     HARD_DELETE_DAYS,
+    NIGHTLY_CUE_OVERLAP_MIN_SHARED,
+    NIGHTLY_CUE_OVERLAP_PAIR_LIMIT,
+    NIGHTLY_CUE_OVERLAP_THRESHOLD,
     NIGHTLY_INTERVAL_HOURS,
     PROBATIONARY_AUTOPURGE_DAYS,
     TURN_LOG_RETENTION_DAYS,
@@ -405,6 +408,57 @@ def _prune_turn_log(
             (user_id, agent_id, cutoff_ms),
         )
     return cur.rowcount
+
+
+def count_cue_overlap_pairs(
+    conn: sqlite3.Connection,
+    user_id: str,
+    agent_id: str,
+    min_shared: int = NIGHTLY_CUE_OVERLAP_MIN_SHARED,
+    threshold: float = NIGHTLY_CUE_OVERLAP_THRESHOLD,
+    pair_limit: int = NIGHTLY_CUE_OVERLAP_PAIR_LIMIT,
+) -> int:
+    """Count non-archived memory pairs sharing >= threshold fraction of their cue edges.
+
+    Uses overlap coefficient (shared / min(a, b)) so a small memory that is entirely
+    contained in a larger one scores 1.0 — exactly the case the batch-dedup pass fixes.
+    Returns as soon as pair_limit is reached so the scan is bounded.
+    """
+    row = conn.execute(
+        """
+        WITH mem_counts AS (
+            SELECT ce.memory_id, COUNT(*) AS cnt
+            FROM cue_edges ce
+            JOIN memories m ON m.id = ce.memory_id AND m.archived = 0
+            WHERE ce.user_id = ? AND ce.agent_id = ? AND ce.candidate = 0
+            GROUP BY ce.memory_id
+        ),
+        pair_shared AS (
+            SELECT a.memory_id AS ma, b.memory_id AS mb,
+                   COUNT(*) AS s,
+                   ca.cnt AS ca_cnt, cb.cnt AS cb_cnt
+            FROM cue_edges a
+            JOIN cue_edges b
+                ON  a.cue_id     = b.cue_id
+                AND a.memory_id  < b.memory_id
+                AND b.user_id    = a.user_id
+                AND b.agent_id   = a.agent_id
+                AND b.candidate  = 0
+            JOIN mem_counts ca ON ca.memory_id = a.memory_id
+            JOIN mem_counts cb ON cb.memory_id = b.memory_id
+            WHERE a.user_id = ? AND a.agent_id = ? AND a.candidate = 0
+            GROUP BY a.memory_id, b.memory_id
+            HAVING COUNT(*) >= ?
+        )
+        SELECT COUNT(*) FROM (
+            SELECT 1 FROM pair_shared
+            WHERE CAST(s AS REAL) / min(ca_cnt, cb_cnt) >= ?
+            LIMIT ?
+        )
+        """,
+        (user_id, agent_id, user_id, agent_id, min_shared, threshold, pair_limit),
+    ).fetchone()
+    return row[0] if row else 0
 
 
 def _update_nightly_flag(

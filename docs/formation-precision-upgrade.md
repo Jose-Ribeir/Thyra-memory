@@ -219,7 +219,32 @@ Vetoes themselves are pattern-based (no numeric knob) — they are hard rejects 
 
 ---
 
-## 10. Open questions
+## 10. Nightly trigger — cue-overlap signal (added)
+
+The original plan relied on two triggers: time (24 h) and usage count (25 new formations). Neither fires
+proactively when memories become semantically redundant mid-session — the dedup pass only ran on a schedule.
+
+**New trigger (implemented):** `count_cue_overlap_pairs` in `thyra/consolidation/nightly.py` fires the sweep
+early whenever `NIGHTLY_CUE_OVERLAP_PAIR_LIMIT` or more active memory pairs share ≥
+`NIGHTLY_CUE_OVERLAP_THRESHOLD` of their cue edges (overlap coefficient: shared / min(a, b)).
+
+Overlap coefficient is chosen over Jaccard so a small memory fully contained in a larger one scores 1.0 —
+exactly the case `_batch_dedup_pass` resolves. `NIGHTLY_CUE_OVERLAP_MIN_SHARED = 4` filters out
+single-cue false positives (two memories that happen to share a common word).
+
+**Config knobs** (`thyra/config.py`):
+| Const | Default | Meaning |
+|---|---|---|
+| `NIGHTLY_CUE_OVERLAP_THRESHOLD` | `0.70` | Min overlap fraction to flag a pair |
+| `NIGHTLY_CUE_OVERLAP_MIN_SHARED` | `4` | Min absolute shared cues (noise floor) |
+| `NIGHTLY_CUE_OVERLAP_PAIR_LIMIT` | `3` | Trigger when this many pairs are flagged |
+
+The check is skipped when `time_due` or `usage_due` is already true, so it adds zero cost for the common
+case. The SQL uses a bounded inner `LIMIT` so the scan stops as soon as the threshold is reached.
+
+---
+
+## 11. Open questions
 
 - **Distiller model:** which local ~8B instruct model, and is it already in `H:\HuggingFace` (the refiner's
   cache)? Reuse the same prewarm path or a separate one?

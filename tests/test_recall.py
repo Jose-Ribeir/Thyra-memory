@@ -163,9 +163,12 @@ class TestScoring:
         scored = score_memories(
             memories, ["python"], cue_map, assoc_map, sit_edges, idf, {}, now
         )
-        # Memory has no "python" cue edge so its spreading is 0
+        # Memory has no "python" cue edge so spreading=0.
+        # Score = base_level * PRESENCE_FLOOR * recency_mult.
+        # With RECENCY_BOOST_MAX=0.80 a brand-new memory gets recency_mult=1.80,
+        # giving max score = 1.0 * 0.20 * 1.80 = 0.36. Threshold updated accordingly.
         python_score = next((s for r, s in scored if r.id == mem_id), 0)
-        assert python_score < 0.3
+        assert python_score < 0.40
 
     def test_strong_memory_scores_higher_than_weak(self, tmp_db):
         strong = create_memory(

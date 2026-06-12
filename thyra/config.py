@@ -188,6 +188,14 @@ NIGHTLY_IDLE_CHECK_SECONDS = 3600  # 1 hour
 # How often the junk-cleanup pass runs per user/agent pair (post-usage trigger).
 # Lighter than nightly — safe to fire multiple times per day on a local machine.
 CLEANUP_INTERVAL_HOURS = 4
+# Cue-overlap trigger: fire nightly early when memories are becoming redundant.
+# Threshold = min(shared_cues / min(a_cues, b_cues)) to flag a pair as overlapping.
+NIGHTLY_CUE_OVERLAP_THRESHOLD: float = 0.70
+# Minimum absolute shared cues for a pair to be considered (avoids false positives
+# on memories with only 1–2 cues that happen to share a common word).
+NIGHTLY_CUE_OVERLAP_MIN_SHARED: int = 4
+# Number of overlapping pairs that triggers the sweep.
+NIGHTLY_CUE_OVERLAP_PAIR_LIMIT: int = 3
 
 # ── Paths (overridable via env) ───────────────────────────────────────────────
 THYRA_DB_PATH: str = os.environ.get(

@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import pathlib
-import threading
 import time
-from collections import deque
 
 from thyra.config import (
     CLEANUP_INTERVAL_HOURS,
+    NIGHTLY_CUE_OVERLAP_MIN_SHARED,
+    NIGHTLY_CUE_OVERLAP_PAIR_LIMIT,
+    NIGHTLY_CUE_OVERLAP_THRESHOLD,
     NIGHTLY_IDLE_CHECK_SECONDS,
     NIGHTLY_INTERVAL_HOURS,
     SWEEP_FORMATION_THRESHOLD,
     THYRA_DB_PATH,
     WORKER_POLL_SECONDS,
 )
-from thyra.models.delta import DeltaEvent
 
 log = logging.getLogger("thyra.worker")
 
@@ -25,24 +23,15 @@ log = logging.getLogger("thyra.worker")
 class BackgroundWorker:
     def __init__(self, db_path: str | None = None) -> None:
         self._db_path = db_path or THYRA_DB_PATH
-        self._queue_dir = pathlib.Path(self._db_path).parent / "delta_queue"
-        self._queue_dir.mkdir(parents=True, exist_ok=True)
         self._running = True
         self._last_nightly: dict[str, float] = {}
         self._last_cleanup: dict[str, float] = {}
-        # Per-pair turn window (deque maxlen=3) for Hebbian association
-        self._turn_windows: dict[str, deque] = {}
-        # Per-pair locks to serialize consolidation
-        self._pair_locks: dict[str, threading.Lock] = {}
-        self._pair_locks_lock = threading.Lock()
 
     def stop(self) -> None:
         self._running = False
 
     def run(self) -> None:
         log.info("Thyra consolidation worker started (db=%s)", self._db_path)
-        # On startup, catch up any pairs whose nightly is overdue — covers the
-        # common case where the PC was off and the scheduled window was missed.
         self._startup_nightly_check()
         _last_idle_check = time.time()
         while self._running:
@@ -50,8 +39,6 @@ class BackgroundWorker:
                 self._process_queue()
             except Exception as exc:
                 log.exception("Worker loop error: %s", exc)
-            # Periodic idle scan: run nightly for overdue pairs even when no
-            # turns are happening (queue stays empty indefinitely).
             if time.time() - _last_idle_check >= NIGHTLY_IDLE_CHECK_SECONDS:
                 self._idle_nightly_check()
                 _last_idle_check = time.time()
@@ -60,133 +47,16 @@ class BackgroundWorker:
     # ── Queue processing ───────────────────────────────────────────────────────
 
     def _process_queue(self) -> None:
-        import traceback
+        from thyra.consolidation.drain import drain_queue
 
-        files = sorted(self._queue_dir.glob("*.json"))
-        for fpath in files:
-            if not self._running:
-                break
-            try:
-                self._process_file(fpath)
-            except Exception as exc:
-                log.warning(
-                    "Failed processing %s: %s\n%s",
-                    fpath.name,
-                    exc,
-                    traceback.format_exc(),
-                )
-                self._move_to_errors(fpath)
-
-    def _process_file(self, fpath: pathlib.Path) -> None:
-        with open(fpath, encoding="utf-8") as f:
-            data = json.load(f)
-        delta = DeltaEvent.from_dict(data)
-        pair_key = f"{delta.user_id}:{delta.agent_id}"
-        lock = self._get_pair_lock(pair_key)
-        with lock:
-            self._apply_delta(delta)
-            self._maybe_cleanup(delta.user_id, delta.agent_id)
-            self._maybe_nightly(delta.user_id, delta.agent_id)
-        fpath.unlink(missing_ok=True)
-
-    # ── Core delta processing (ordered — do not reorder) ─────────────────────
-
-    def _apply_delta(self, delta: DeltaEvent) -> None:
-        from thyra.db.connection import DBConnection
-        from thyra.consolidation.decay import recompute_and_update, archive_check
-        from thyra.consolidation.reinforcement import apply_reinforcement
-        from thyra.consolidation.edges import update_cue_edges, hebbian_association
-        from thyra.consolidation.situation import crystallize_situations
-        from thyra.recall.cache import HOT_CACHE
-
-        conn = DBConnection.get(self._db_path)
-
-        # Step 1: Idempotency
-        if delta.turn_id:
-            existing = conn.execute(
-                "SELECT 1 FROM processed_turns WHERE turn_id=?", (delta.turn_id,)
-            ).fetchone()
-            if existing:
-                return
-
-        # Step 2: Auto-formation
-        # Run in rules-only mode so the worker thread never blocks on a model load.
-        # find_near_match already uses fast=True; category classification uses rules.
-        new_memory_ids: list[str] = []
-        try:
-            from thyra.formation.pipeline import run_formation_pipeline
-            from thyra.formation.refiner import set_rules_only
-
-            set_rules_only(True)
-            try:
-                actions = run_formation_pipeline(conn, delta)
-            finally:
-                set_rules_only(False)
-            new_memory_ids = [mid for action, mid in actions if action == "created"]
-        except ImportError:
-            pass
-        except Exception as exc:
-            log.warning("Formation pipeline error: %s", exc)
-
-        # Step 2.5: Synonym expansion for newly formed memories (Stage 6)
-        if new_memory_ids:
-            try:
-                from thyra.config import SYNONYM_EXPANSION_ENABLED
-
-                if SYNONYM_EXPANSION_ENABLED:
-                    from thyra.recall.synonym import seed_synonym_edges_for_memory
-
-                    for mid in new_memory_ids:
-                        seed_synonym_edges_for_memory(
-                            conn, mid, delta.user_id, delta.agent_id
-                        )
-            except Exception as exc:
-                log.debug("Synonym expansion error: %s", exc)
-
-        # Step 3: Lazy decay on touched memories
-        recompute_and_update(conn, delta.memories_served, delta.user_id, delta.agent_id)
-
-        # Step 4: Reinforcement
-        apply_reinforcement(conn, delta)
-
-        # Step 5: Cue edge updates
-        update_cue_edges(conn, delta)
-
-        # Step 6: Hebbian association (needs the window)
-        pair_key = f"{delta.user_id}:{delta.agent_id}"
-        if pair_key not in self._turn_windows:
-            self._turn_windows[pair_key] = deque(maxlen=3)
-        window = self._turn_windows[pair_key]
-        window.append(delta)
-        hebbian_association(conn, list(window), delta.user_id, delta.agent_id)
-
-        # Step 7: Situation crystallization
-        crystallize_situations(conn, list(window), delta.user_id, delta.agent_id)
-
-        # Step 8: Archive check LAST (so boosted memories can't be archived same batch)
-        archive_check(conn, delta.user_id, delta.agent_id)
-
-        # Commit + mark processed
-        with conn:
-            if delta.turn_id:
-                conn.execute(
-                    "INSERT OR IGNORE INTO processed_turns (turn_id, processed_at) VALUES (?,?)",
-                    (delta.turn_id, int(time.time() * 1000)),
-                )
-            # Log the turn for association tracking
-            _log_turn(conn, delta)
-
-        # Invalidate hot cache
-        HOT_CACHE.invalidate(f"snapshot:{delta.user_id}:{delta.agent_id}")
+        drain_queue(self._db_path, budget_ms=None)
 
     # ── Cleanup & nightly ──────────────────────────────────────────────────────
 
     def _maybe_cleanup(self, user_id: str, agent_id: str) -> None:
-        """Run the junk-cleanup pass for (user_id, agent_id) if enough time has passed.
+        """Run junk cleanup for (user_id, agent_id) if enough time has passed.
 
-        Rate-limited to once per CLEANUP_INTERVAL_HOURS per pair (in-memory only —
-        a restart resets the timer, which is fine since the user said a couple of
-        runs per day is acceptable on a local machine).
+        Rate-limited to once per CLEANUP_INTERVAL_HOURS per pair.
         """
         pair_key = f"{user_id}:{agent_id}"
         if (
@@ -214,19 +84,14 @@ class BackgroundWorker:
             log.warning("Cleanup error: %s", exc)
 
     def _maybe_nightly(self, user_id: str, agent_id: str) -> None:
-        """Run the nightly sweep for (user_id, agent_id) if enough time has passed.
+        """Run the nightly sweep for (user_id, agent_id) if any trigger fires.
 
-        Uses the DB-persisted last_nightly timestamp as the authoritative source so
-        the check survives server restarts (in-memory dict resets to 0 on each start,
-        which would re-run the sweep on the very first delta regardless of when it
-        last ran).
+        Uses the DB-persisted last_nightly timestamp so the check survives
+        worker restarts.
         """
         pair_key = f"{user_id}:{agent_id}"
         last = self._last_nightly.get(pair_key, 0.0)
 
-        # On first encounter for this pair, read the persisted timestamp from the DB.
-        # This prevents re-running the sweep immediately after a server restart when
-        # it was already run recently.
         if last == 0.0:
             try:
                 from thyra.db.connection import DBConnection
@@ -236,13 +101,14 @@ class BackgroundWorker:
                 db_last_ms = float(
                     get_flag(conn, "last_nightly", user_id, agent_id, default="0")
                 )
-                last = db_last_ms / 1000.0  # ms → seconds
+                last = db_last_ms / 1000.0
                 self._last_nightly[pair_key] = last
             except Exception:
-                pass  # fall through — 0.0 will trigger the sweep, which is safe
+                pass
 
         time_due = time.time() - last >= NIGHTLY_INTERVAL_HOURS * 3600
         usage_due = False
+        cue_due = False
         if not time_due:
             try:
                 from thyra.db.connection import DBConnection
@@ -255,7 +121,27 @@ class BackgroundWorker:
             except Exception:
                 pass
 
-        if time_due or usage_due:
+        if not time_due and not usage_due:
+            try:
+                from thyra.consolidation.nightly import count_cue_overlap_pairs
+                from thyra.db.connection import DBConnection
+
+                conn = DBConnection.get(self._db_path)
+                cue_due = (
+                    count_cue_overlap_pairs(
+                        conn,
+                        user_id,
+                        agent_id,
+                        min_shared=NIGHTLY_CUE_OVERLAP_MIN_SHARED,
+                        threshold=NIGHTLY_CUE_OVERLAP_THRESHOLD,
+                        pair_limit=NIGHTLY_CUE_OVERLAP_PAIR_LIMIT,
+                    )
+                    >= NIGHTLY_CUE_OVERLAP_PAIR_LIMIT
+                )
+            except Exception:
+                pass
+
+        if time_due or usage_due or cue_due:
             self._last_nightly[pair_key] = time.time()
             try:
                 from thyra.consolidation.nightly import run_nightly_sweep
@@ -263,11 +149,12 @@ class BackgroundWorker:
 
                 conn = DBConnection.get(self._db_path)
                 run_nightly_sweep(conn, user_id, agent_id)
+                reason = "usage" if usage_due else "cue_overlap" if cue_due else "time"
                 log.info(
                     "Nightly sweep complete for %s:%s (reason=%s)",
                     user_id,
                     agent_id,
-                    "usage" if usage_due else "time",
+                    reason,
                 )
             except ImportError:
                 pass
@@ -275,11 +162,7 @@ class BackgroundWorker:
                 log.warning("Nightly sweep error: %s", exc)
 
     def _startup_nightly_check(self) -> None:
-        """On worker startup, run nightly for any (user, agent) pair that is overdue.
-
-        The PC may have been off for days — this catches up decay, archiving, and
-        pruning that would otherwise only run after the user's next conversation turn.
-        """
+        """On worker startup, run nightly for any pair that is overdue."""
         try:
             from thyra.db.connection import DBConnection
 
@@ -294,12 +177,7 @@ class BackgroundWorker:
             log.warning("Startup nightly check error: %s", exc)
 
     def _idle_nightly_check(self) -> None:
-        """Periodic idle scan: run cleanup and nightly for any overdue pair.
-
-        Called by the run loop every NIGHTLY_IDLE_CHECK_SECONDS regardless of queue
-        activity — covers the case where the PC stays on but the user never opens
-        Claude Code for days.
-        """
+        """Periodic scan: run cleanup and nightly for any overdue pair."""
         try:
             from thyra.db.connection import DBConnection
 
@@ -313,23 +191,6 @@ class BackgroundWorker:
         except Exception as exc:
             log.warning("Idle nightly check error: %s", exc)
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
-
-    def _get_pair_lock(self, pair_key: str) -> threading.Lock:
-        with self._pair_locks_lock:
-            if pair_key not in self._pair_locks:
-                self._pair_locks[pair_key] = threading.Lock()
-            return self._pair_locks[pair_key]
-
-    def _move_to_errors(self, fpath: pathlib.Path) -> None:
-        errors_dir = self._queue_dir / "errors"
-        errors_dir.mkdir(exist_ok=True)
-        dest = errors_dir / fpath.name
-        try:
-            fpath.rename(dest)
-        except Exception:
-            pass
-
 
 def _formations_since(conn, user_id: str, agent_id: str, since_ms: int) -> int:
     """Count active memories created after since_ms (epoch milliseconds)."""
@@ -339,23 +200,3 @@ def _formations_since(conn, user_id: str, agent_id: str, since_ms: int) -> int:
         (user_id, agent_id, since_ms),
     ).fetchone()
     return row[0] if row else 0
-
-
-def _log_turn(conn, delta: DeltaEvent) -> None:
-    import json
-
-    conn.execute(
-        """INSERT OR IGNORE INTO turn_log
-           (turn_id, session_id, user_id, agent_id, memories_served, memories_used, cues_fired, created_at)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (
-            delta.turn_id,
-            delta.session_id,
-            delta.user_id,
-            delta.agent_id,
-            json.dumps(delta.memories_served),
-            json.dumps(delta.memories_declared),
-            json.dumps(delta.cues_fired),
-            delta.timestamp,
-        ),
-    )

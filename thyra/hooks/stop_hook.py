@@ -119,6 +119,13 @@ def main() -> None:
         }
         _enqueue_delta(delta, db_path)
 
+        try:
+            from thyra.consolidation.drain import drain_queue
+
+            drain_queue(db_path, budget_ms=2500)
+        except Exception:
+            pass  # stop hook must never surface errors
+
     except Exception:
         pass  # stop hook must never surface errors
 
